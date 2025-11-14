@@ -1,14 +1,28 @@
-# CodexAgent - DSPy Module for OpenAI Codex SDK
+# codex_dspy - DSPy Modules for Codex & Claude
 
-A DSPy module that wraps the OpenAI Codex SDK. Uses a **two-turn pattern** that keeps agents "in distribution" during task execution.
+DSPy modules that wrap agent SDKs with signature-driven interfaces. Each agent instance maintains a stateful conversation (thread/session), making them perfect for multi-turn agentic workflows.
+
+## Supported Agents
+
+- **CodexAgent** - OpenAI Codex SDK wrapper (two-turn pattern, native Pydantic support)
+- **ClaudeAgent** - Anthropic Claude Agent SDK wrapper (string + Pydantic via prompt engineering)
 
 ## Features
 
+### CodexAgent
 - **Two-turn pattern** - Natural task execution + structured extraction
 - **Stateful threads** - Each agent instance = one conversation thread
 - **Typed outputs** - Pydantic models, primitives, lists - all work naturally
 - **Execution trace** - Full visibility into commands, file changes, reasoning
 - **DSPy-native** - Standard signatures, based on TwoStepAdapter patterns
+
+### ClaudeAgent
+- **Dual-mode architecture** - String and Pydantic outputs via claude-agent-sdk
+- **Prompt engineering for Pydantic** - XML tags + JSON schema approach (~80-86% reliability)
+- **Cost tracking** - USD cost tracking for both modes
+- **Permission modes** - Control execution permissions
+- **System prompts** - Customize agent behavior
+- **No extra API requirements** - Uses existing Claude authentication
 
 ## Installation
 
@@ -19,11 +33,20 @@ uv sync
 # For development (includes pytest, pre-commit)
 uv sync --extra dev
 
-# Ensure codex CLI is available
+# For CodexAgent: Ensure codex CLI is available
 which codex
+
+# For ClaudeAgent: Ensure Claude Code CLI is available
+which claude  # Should be available after installing claude-agent-sdk
 ```
 
+**Environment Variables:**
+- `CODEX_API_KEY` or `OPENAI_API_KEY` - For CodexAgent
+- `ANTHROPIC_API_KEY` - For ClaudeAgent
+
 ## Quick Start
+
+### CodexAgent
 
 ```python
 import dspy
@@ -39,7 +62,26 @@ print(result.trace)   # Execution trace
 print(result.usage)   # Token counts
 ```
 
-### With Pydantic Models
+### ClaudeAgent
+
+```python
+import dspy
+from codex_dspy import ClaudeAgent
+
+# Define signature
+sig = dspy.Signature('message:str -> answer:str')
+
+# Create agent
+agent = ClaudeAgent(sig, working_directory=".")
+
+result = agent(message="What files are in this directory?")
+print(result.answer)     # String response
+print(result.trace)      # Execution trace (dict-based)
+print(result.cost_usd)   # Cost in USD
+print(result.session_id) # Session ID for debugging
+```
+
+### CodexAgent - With Pydantic Models
 
 ```python
 from typing import Literal
@@ -66,7 +108,33 @@ print(result.bugs)              # list[BugReport]
 print(result.bugs[0].severity)  # Typed access
 ```
 
-## How It Works: Two-Turn Pattern
+### ClaudeAgent - With Pydantic Models
+
+```python
+from pydantic import BaseModel, Field
+from codex_dspy import ClaudeAgent
+
+class SentimentAnalysis(BaseModel):
+    sentiment: str = Field(description="positive, negative, or neutral")
+    confidence: float = Field(description="0-1", ge=0, le=1)
+    key_points: list[str]
+
+class AnalyzeSignature(dspy.Signature):
+    text: str = dspy.InputField()
+    analysis: SentimentAnalysis = dspy.OutputField()
+
+# working_directory optional for Pydantic mode
+agent = ClaudeAgent(AnalyzeSignature)
+
+result = agent(text="I love this product!")
+print(result.analysis.sentiment)     # "positive"
+print(result.analysis.confidence)    # 0.95
+print(result.analysis.key_points)    # ["love", ...]
+```
+
+**Note:** CodexAgent uses native SDK support for Pydantic (~100% reliability). ClaudeAgent uses prompt engineering (~80-86% reliability).
+
+## How It Works: Two-Turn Pattern (CodexAgent)
 
 Unlike forcing JSON output during task execution (which pushes models out of distribution), CodexAgent uses a **two-turn pattern**:
 
@@ -255,6 +323,35 @@ The TypeScript format (`format_turn2_typescript`) is preferred because:
 - LLMs are heavily trained on TypeScript syntax
 - JSDoc comments provide field descriptions naturally
 - Output is parseable with `json5` (handles trailing commas, unquoted keys)
+
+### ClaudeAgent
+
+```python
+class ClaudeAgent(BaseAgent):
+    def __init__(
+        self,
+        signature: str | type[Signature],  # At least 1 input, exactly 1 output field
+        working_directory: Optional[str] = None,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        permission_mode: Optional[str] = None,  # "default", "acceptEdits", "plan", "bypassPermissions"
+        allowed_tools: Optional[list[str]] = None,
+        max_turns: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    )
+```
+
+#### Methods
+
+##### `forward(**kwargs) -> Prediction`
+
+**Returns** a `Prediction` with:
+- Typed output field (string or Pydantic model, name from signature)
+- `trace` - `list[dict]` - Converted message trace
+- `session_id` - `str` - Session ID
+- `cost_usd` - `float` - Total cost in USD
+- `num_turns` - `int` - Number of turns
 
 ## Usage Patterns
 
@@ -480,6 +577,15 @@ See LICENSE file.
 
 ## Related Documentation
 
+### CodexAgent
 - [Codex SDK API Reference](./docs/CODEX_SDK_API_SURFACE.md)
 - [Codex Architecture](./docs/CODEX_ARCHITECTURE.md)
+- [Codex Quick Reference](./docs/CODEX_QUICK_REFERENCE.md)
+
+### ClaudeAgent
+- [Claude Integration Guide](./docs/CLAUDE_INTEGRATION.md)
+- [Claude Basic Usage Example](./examples/claude_basic_usage.py)
+
+### General
 - [DSPy Documentation](https://dspy-docs.vercel.app/)
+- [Examples Directory](./examples/)
