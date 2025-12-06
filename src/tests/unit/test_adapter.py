@@ -557,3 +557,35 @@ class TestEdgeCaseTypes:
 
         assert '"counts"' in result
         assert "```json" in result
+
+    def test_format_turn2_list_optional_model(self):
+        """list[Model | None] should render with schema and null comment."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"items": (list[SimpleModel | None], "Items with gaps")},
+        )
+
+        result = adapter.format_turn2(sig)
+
+        assert "[[ ## items ## ]]" in result
+        # Should show array with model schema
+        assert "[" in result
+        assert "name:" in result
+        assert "age:" in result
+        # Should indicate null is allowed
+        assert "null" in result
+        # Should NOT be the broken format with }[]
+        assert "} or null[]" not in result
+
+    def test_render_type_str_list_optional_model(self):
+        """list[Model | None] should render with null comment, not broken brackets."""
+        result = _render_type_str(list[SimpleModel | None])
+
+        # Should show the model schema in array format
+        assert "[" in result
+        assert "name:" in result
+        # Should indicate null is allowed
+        assert "null" in result
+        # Should NOT have the broken }[] format
+        assert "} or null[]" not in result

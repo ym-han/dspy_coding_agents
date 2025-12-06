@@ -66,12 +66,22 @@ def _render_type_str(
     # list[T]
     if origin is list:
         inner_type = args[0] if args else Any
+        # Direct Pydantic model
         if inspect.isclass(inner_type) and issubclass(inner_type, BaseModel):
             inner_schema = _build_simplified_schema(inner_type, indent + 1, seen_models)
             current_indent = "  " * indent
             return f"[\n{inner_schema}\n{current_indent}]"
-        else:
-            return f"{_render_type_str(inner_type, indent)}[]"
+        # list[Model | None] - Optional Pydantic model
+        inner_origin = get_origin(inner_type)
+        if inner_origin is Union or inner_origin is types.UnionType:
+            inner_args = get_args(inner_type)
+            non_none = [a for a in inner_args if a is not type(None)]
+            if len(non_none) == 1 and inspect.isclass(non_none[0]) and issubclass(non_none[0], BaseModel):
+                inner_schema = _build_simplified_schema(non_none[0], indent + 1, seen_models)
+                current_indent = "  " * indent
+                return f"[\n{inner_schema},  // or null\n{current_indent}]"
+        # Other list types (primitives, nested lists, etc.)
+        return f"{_render_type_str(inner_type, indent)}[]"
 
     # dict[K, V]
     if origin is dict:
@@ -252,9 +262,20 @@ class CodexAdapter:
                 # list[T] - show array schema
                 inner = get_args(annotation)[0] if get_args(annotation) else Any
                 if inspect.isclass(inner) and issubclass(inner, BaseModel):
+                    # list[Model]
                     inner_schema = _build_simplified_schema(inner, indent=1)
                     parts.append(f"[\n{inner_schema}\n]")
                 else:
+                    # Check for list[Model | None]
+                    inner_origin = get_origin(inner)
+                    if inner_origin is Union or inner_origin is types.UnionType:
+                        inner_args = get_args(inner)
+                        non_none = [a for a in inner_args if a is not type(None)]
+                        if len(non_none) == 1 and inspect.isclass(non_none[0]) and issubclass(non_none[0], BaseModel):
+                            inner_schema = _build_simplified_schema(non_none[0], indent=1)
+                            parts.append(f"[\n{inner_schema},  // or null\n]")
+                            continue
+                    # Other list types
                     parts.append(f"{_render_type_str(inner)}[]")
             else:
                 # Primitive or other type
