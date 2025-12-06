@@ -7,7 +7,7 @@ from typing import Optional
 
 import pytest
 
-from codex_dspy.agent import _combine_usage, _is_all_str_outputs, _strip_json_fences
+from codex_dspy.agent import _build_output_schema, _combine_usage, _is_all_str_outputs, _strip_json_fences
 
 
 class TestStripJsonFences:
@@ -278,3 +278,64 @@ class TestListPydanticParsing:
 
         assert isinstance(result, SingleModel)
         assert result.value == 42
+
+
+class TestBuildOutputSchema:
+    """Tests for _build_output_schema function."""
+
+    def test_required_field_marked_required(self):
+        """Non-optional fields should be in required list."""
+        sig = MockSignature({"answer": str})
+        schema = _build_output_schema(sig)
+
+        assert "answer" in schema["required"]
+
+    def test_optional_typing_union_not_required(self):
+        """Optional[str] (typing.Union) should not be required."""
+        from typing import Union
+        sig = MockSignature({"notes": Union[str, None]})
+        schema = _build_output_schema(sig)
+
+        assert "notes" not in schema["required"]
+        assert "notes" in schema["properties"]
+
+    def test_optional_pep604_not_required(self):
+        """str | None (PEP 604) should not be required."""
+        sig = MockSignature({"notes": str | None})
+        schema = _build_output_schema(sig)
+
+        assert "notes" not in schema["required"]
+        assert "notes" in schema["properties"]
+
+    def test_mixed_required_and_optional(self):
+        """Mix of required and optional fields should be handled correctly."""
+        sig = MockSignature({
+            "answer": str,           # required
+            "notes": str | None,     # optional (PEP 604)
+            "count": int,            # required
+        })
+        schema = _build_output_schema(sig)
+
+        assert "answer" in schema["required"]
+        assert "count" in schema["required"]
+        assert "notes" not in schema["required"]
+
+        # All fields should be in properties
+        assert "answer" in schema["properties"]
+        assert "notes" in schema["properties"]
+        assert "count" in schema["properties"]
+
+    def test_pydantic_model_field(self):
+        """Pydantic model fields should use model_json_schema."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+
+        sig = MockSignature({"result": MyModel})
+        schema = _build_output_schema(sig)
+
+        assert "result" in schema["required"]
+        assert "result" in schema["properties"]
+        # Should have Pydantic schema structure
+        assert "properties" in schema["properties"]["result"]

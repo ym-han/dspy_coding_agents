@@ -102,8 +102,10 @@ def _build_output_schema(signature: Signature) -> dict[str, Any]:
             properties[name] = TypeAdapter(annotation).json_schema()
 
         # Check if required (not Optional)
+        # Handle both typing.Union and types.UnionType (PEP 604: str | None)
         origin = get_origin(annotation)
-        if origin is not Union or type(None) not in get_args(annotation):
+        is_optional = (origin is Union or origin is types.UnionType) and type(None) in get_args(annotation)
+        if not is_optional:
             required.append(name)
 
     schema = {
