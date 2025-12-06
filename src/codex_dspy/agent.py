@@ -3,8 +3,13 @@
 This module provides a signature-driven interface to the Codex agent SDK.
 Each CodexAgent instance maintains a stateful thread that accumulates context
 across multiple forward() calls.
+
+Uses a two-turn pattern:
+- Turn 1: Natural task execution (agent does work)
+- Turn 2: Structured output extraction (agent formats findings)
 """
 
+import json
 from typing import Any, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -14,28 +19,53 @@ from dspy.primitives.prediction import Prediction
 from dspy.signatures.signature import Signature, ensure_signature
 
 from codex import Codex, CodexOptions, SandboxMode, ThreadOptions, TurnOptions
+from codex_dspy.adapter import CodexAdapter
 
 
-def _is_str_type(annotation: Any) -> bool:
-    """Check if annotation is str or Optional[str].
+def _is_all_str_outputs(signature: Signature) -> bool:
+    """Check if all output fields are str or Optional[str]."""
+    for field in signature.output_fields.values():
+        annotation = field.annotation
+        if annotation == str:
+            continue
+        origin = get_origin(annotation)
+        if origin is Union:
+            args = get_args(annotation)
+            if len(args) == 2 and str in args and type(None) in args:
+                continue
+        return False
+    return True
 
-    Args:
-        annotation: Type annotation to check
 
-    Returns:
-        True if annotation is str, Optional[str], or Union[str, None]
-    """
-    if annotation == str:
-        return True
+def _build_output_schema(signature: Signature) -> dict[str, Any]:
+    """Build a combined JSON schema for all output fields."""
+    properties = {}
+    required = []
 
-    origin = get_origin(annotation)
-    if origin is Union:
-        args = get_args(annotation)
-        # Check for Optional[str] which is Union[str, None]
-        if len(args) == 2 and str in args and type(None) in args:
-            return True
+    for name, field in signature.output_fields.items():
+        annotation = field.annotation
+        if annotation == str:
+            properties[name] = {"type": "string"}
+        elif hasattr(annotation, "model_json_schema"):
+            # Pydantic model
+            properties[name] = annotation.model_json_schema()
+        else:
+            # Fallback - try to get schema via pydantic TypeAdapter
+            from pydantic import TypeAdapter
+            properties[name] = TypeAdapter(annotation).json_schema()
 
-    return False
+        # Check if required (not Optional)
+        origin = get_origin(annotation)
+        if origin is not Union or type(None) not in get_args(annotation):
+            required.append(name)
+
+    schema = {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+    return schema
 
 
 class CodexAgent(dspy.Module):
@@ -44,8 +74,12 @@ class CodexAgent(dspy.Module):
     Creates a stateful agent where each instance maintains one conversation thread.
     Multiple forward() calls on the same instance continue the same conversation.
 
+    Supports multiple input and output fields. Uses a two-turn pattern:
+    - Turn 1: Agent receives task naturally and does work
+    - Turn 2: Agent formats findings into structured output
+
     Args:
-        signature: DSPy signature (must have exactly 1 input and 1 output field)
+        signature: DSPy signature with any number of input/output fields
         working_directory: Directory where Codex agent will execute commands
         model: Model to use (e.g., "gpt-4", "gpt-4-turbo"). Defaults to Codex default.
         sandbox_mode: Execution sandbox level (READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS)
@@ -54,22 +88,19 @@ class CodexAgent(dspy.Module):
         base_url: API base URL (falls back to OPENAI_BASE_URL env var)
         codex_path_override: Override path to codex binary (for testing)
 
-    Example:
-        >>> sig = dspy.Signature('message:str -> answer:str')
-        >>> agent = CodexAgent(sig, working_directory=".")
-        >>> result = agent(message="What files are in this directory?")
-        >>> print(result.answer)  # str response
-        >>> print(result.trace)   # list of items (commands, files, etc.)
-        >>> print(result.usage)   # token counts
-
-    Example with Pydantic output:
+    Example with multiple fields:
         >>> class BugReport(BaseModel):
         ...     severity: str
         ...     description: str
-        >>> sig = dspy.Signature('message:str -> report:BugReport')
+        >>> sig = dspy.Signature(
+        ...     "code: str, context: str -> bugs: list[BugReport], summary: str",
+        ...     "Analyze code for bugs"
+        ... )
         >>> agent = CodexAgent(sig, working_directory=".")
-        >>> result = agent(message="Analyze the bug")
-        >>> print(result.report.severity)  # typed access
+        >>> result = agent(code="def foo(): ...", context="Production code")
+        >>> print(result.bugs)    # list[BugReport]
+        >>> print(result.summary) # str
+        >>> print(result.trace)   # execution trace
     """
 
     def __init__(
@@ -88,26 +119,21 @@ class CodexAgent(dspy.Module):
         # Ensure signature is valid
         self.signature = ensure_signature(signature)
 
-        # Validate: exactly 1 input field, 1 output field
-        if len(self.signature.input_fields) != 1:
-            input_fields = list(self.signature.input_fields.keys())
+        # Validate: at least 1 input and 1 output field
+        if len(self.signature.input_fields) < 1:
             raise ValueError(
-                f"CodexAgent requires exactly 1 input field, got {len(input_fields)}: {input_fields}\n"
-                f"Example: dspy.Signature('message:str -> answer:str')"
+                "CodexAgent requires at least 1 input field.\n"
+                "Example: dspy.Signature('message:str -> answer:str')"
             )
 
-        if len(self.signature.output_fields) != 1:
-            output_fields = list(self.signature.output_fields.keys())
+        if len(self.signature.output_fields) < 1:
             raise ValueError(
-                f"CodexAgent requires exactly 1 output field, got {len(output_fields)}: {output_fields}\n"
-                f"Example: dspy.Signature('message:str -> answer:str')"
+                "CodexAgent requires at least 1 output field.\n"
+                "Example: dspy.Signature('message:str -> answer:str')"
             )
 
-        # Extract field names and types
-        self.input_field = list(self.signature.input_fields.keys())[0]
-        self.output_field = list(self.signature.output_fields.keys())[0]
-        self.output_field_info = self.signature.output_fields[self.output_field]
-        self.output_type = self.output_field_info.annotation
+        # Create adapter for formatting
+        self.adapter = CodexAdapter()
 
         # Create Codex client
         self.client = Codex(
@@ -129,64 +155,106 @@ class CodexAgent(dspy.Module):
         )
 
     def forward(self, **kwargs) -> Prediction:
-        """Execute agent with input message.
+        """Execute agent with input fields.
 
         Args:
-            **kwargs: Must contain the input field specified in signature
+            **kwargs: Must contain all input fields specified in signature
 
         Returns:
             Prediction with:
-                - Typed output field (name from signature)
+                - All output fields (typed according to signature)
                 - trace: list[ThreadItem] - chronological items (commands, files, etc.)
                 - usage: Usage - token counts (input_tokens, cached_input_tokens, output_tokens)
 
         Raises:
-            ValueError: If Pydantic parsing fails for typed output
+            ValueError: If parsing fails for typed outputs
         """
-        # 1. Extract input message
-        message = kwargs[self.input_field]
+        # Validate all input fields are provided
+        for field_name in self.signature.input_fields:
+            if field_name not in kwargs:
+                raise ValueError(f"Missing required input field: {field_name}")
 
-        # 2. Append output field description if present (skip DSPy's default ${field_name} placeholder)
-        output_desc = (self.output_field_info.json_schema_extra or {}).get("desc")
-        # Skip if desc is just DSPy's default placeholder (e.g., "${answer}" for field named "answer")
-        if output_desc and output_desc != f"${{{self.output_field}}}":
-            message = f"{message}\n\nPlease produce the following output: {output_desc}"
+        # Turn 1: Natural task execution
+        turn1_prompt = self.adapter.format_turn1(self.signature, kwargs)
+        task_result = self.thread.run(turn1_prompt)
 
-        # 3. Build TurnOptions if output type is not str
-        turn_options = None
-        if not _is_str_type(self.output_type):
-            # Get Pydantic JSON schema and ensure additionalProperties is false
-            schema = self.output_type.model_json_schema()
-            if "additionalProperties" not in schema:
-                schema["additionalProperties"] = False
-            turn_options = TurnOptions(output_schema=schema)
+        # Check if we need structured output extraction
+        if _is_all_str_outputs(self.signature):
+            # All outputs are strings - parse from natural response
+            # For single string output, just return the response
+            if len(self.signature.output_fields) == 1:
+                output_name = list(self.signature.output_fields.keys())[0]
+                return Prediction(
+                    **{output_name: task_result.final_response},
+                    trace=task_result.items,
+                    usage=task_result.usage,
+                )
+            else:
+                # Multiple string outputs - need extraction turn
+                turn2_prompt = self.adapter.format_turn2(self.signature)
+                extract_result = self.thread.run(turn2_prompt)
+                parsed = self.adapter.parse(self.signature, extract_result.final_response)
 
-        # 4. Call Codex SDK
-        result = self.thread.run(message, turn_options)
+                # Combine usage from both turns
+                combined_usage = task_result.usage
+                if extract_result.usage:
+                    # Add extraction usage to task usage
+                    combined_usage = extract_result.usage
 
-        # 5. Parse response
-        parsed_output = result.final_response
+                return Prediction(
+                    **parsed,
+                    trace=task_result.items + extract_result.items,
+                    usage=combined_usage,
+                )
+        else:
+            # Need structured output - Turn 2 with JSON schema
+            turn2_prompt = self.adapter.format_turn2_json(self.signature)
+            output_schema = _build_output_schema(self.signature)
+            turn_options = TurnOptions(output_schema=output_schema)
 
-        if not _is_str_type(self.output_type):
-            # Parse as Pydantic model
+            extract_result = self.thread.run(turn2_prompt, turn_options)
+
+            # Parse JSON response
             try:
-                parsed_output = self.output_type.model_validate_json(result.final_response)
-            except Exception as e:
-                # Provide helpful error with response preview
-                response_preview = result.final_response[:500]
-                if len(result.final_response) > 500:
-                    response_preview += "..."
+                raw_output = json.loads(extract_result.final_response)
+            except json.JSONDecodeError as e:
                 raise ValueError(
-                    f"Failed to parse Codex response as {self.output_type.__name__}: {e}\n"
-                    f"Response: {response_preview}"
+                    f"Failed to parse JSON response: {e}\n"
+                    f"Response: {extract_result.final_response[:500]}"
                 ) from e
 
-        # 6. Return Prediction with typed output + trace + usage
-        return Prediction(
-            **{self.output_field: parsed_output},
-            trace=result.items,
-            usage=result.usage,
-        )
+            # Convert to typed outputs
+            parsed_outputs = {}
+            for name, field in self.signature.output_fields.items():
+                value = raw_output.get(name)
+                annotation = field.annotation
+
+                if value is None:
+                    parsed_outputs[name] = None
+                elif hasattr(annotation, "model_validate"):
+                    # Pydantic model
+                    if isinstance(value, dict):
+                        parsed_outputs[name] = annotation.model_validate(value)
+                    elif isinstance(value, list):
+                        # Could be list[Model]
+                        inner_type = get_args(annotation)[0] if get_args(annotation) else None
+                        if inner_type and hasattr(inner_type, "model_validate"):
+                            parsed_outputs[name] = [inner_type.model_validate(v) for v in value]
+                        else:
+                            parsed_outputs[name] = value
+                    else:
+                        parsed_outputs[name] = value
+                else:
+                    parsed_outputs[name] = value
+
+            # Combine traces and return
+            combined_usage = extract_result.usage or task_result.usage
+
+            return Prediction(
+                **parsed_outputs,
+                trace=task_result.items + extract_result.items,
+                usage=combined_usage,
+            )
 
     @property
     def thread_id(self) -> Optional[str]:

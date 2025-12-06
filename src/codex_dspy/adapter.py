@@ -8,6 +8,7 @@ Based on DSPy's TwoStepAdapter and BAMLAdapter patterns.
 
 import inspect
 import json
+import types
 from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -50,8 +51,8 @@ def _render_type_str(
     except Exception:
         return str(annotation)
 
-    # Optional[T] or T | None
-    if origin is Union:
+    # Optional[T] or T | None (handles both typing.Union and types.UnionType)
+    if origin is Union or origin is types.UnionType:
         non_none_args = [arg for arg in args if arg is not type(None)]
         type_render = " or ".join([_render_type_str(arg, indent) for arg in non_none_args])
         if len(non_none_args) < len(args):
