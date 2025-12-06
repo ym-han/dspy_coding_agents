@@ -1,15 +1,15 @@
 # CodexAgent - DSPy Module for OpenAI Codex SDK
 
-A DSPy module that wraps the OpenAI Codex SDK with a signature-driven interface. Each agent instance maintains a stateful conversation thread, making it perfect for multi-turn agentic workflows.
+A DSPy module that wraps the OpenAI Codex SDK with a signature-driven interface. Supports **multiple input/output fields** and uses a **two-turn pattern** that keeps agents "in distribution" during task execution.
 
 ## Features
 
-- **Signature-driven** - Use DSPy signatures for type safety and clarity
+- **Multi-field signatures** - Any number of input and output fields
+- **Two-turn pattern** - Natural task execution + structured extraction
 - **Stateful threads** - Each agent instance = one conversation thread
-- **Smart schema handling** - Automatically handles str vs Pydantic outputs
+- **Smart schema handling** - BAML-style schemas for Pydantic, markers for strings
 - **Rich outputs** - Get typed results + execution trace + token usage
-- **Multi-turn conversations** - Context preserved across calls
-- **Output field descriptions** - Automatically enhance prompts
+- **DSPy-native** - Based on TwoStepAdapter and BAMLAdapter patterns
 
 ## Installation
 
@@ -17,48 +17,115 @@ A DSPy module that wraps the OpenAI Codex SDK with a signature-driven interface.
 # Install dependencies
 uv sync
 
+# For development (includes pytest, pre-commit)
+uv sync --extra dev
+
 # Ensure codex CLI is available
-which codex  # Should point to /opt/homebrew/bin/codex or similar
+which codex
 ```
 
 ## Quick Start
 
-### Basic String Output
+### Simple Single-Field Signature
 
 ```python
 import dspy
-from codex_agent import CodexAgent
+from codex_dspy import CodexAgent
 
-# Define signature
 sig = dspy.Signature('message:str -> answer:str')
-
-# Create agent
 agent = CodexAgent(sig, working_directory=".")
 
-# Use it
 result = agent(message="What files are in this directory?")
 print(result.answer)  # String response
-print(result.trace)   # Execution items (commands, files, etc.)
+print(result.trace)   # Execution trace
 print(result.usage)   # Token counts
 ```
 
-### Structured Output with Pydantic
+### Multi-Field Signature with Pydantic
 
 ```python
+from typing import Literal
 from pydantic import BaseModel, Field
 
 class BugReport(BaseModel):
-    severity: str = Field(description="critical, high, medium, or low")
-    description: str
-    affected_files: list[str]
+    severity: Literal["low", "medium", "high"] = Field(description="Bug severity")
+    location: str = Field(description="File and line number")
+    description: str = Field(description="What the bug does")
+    suggested_fix: str = Field(description="How to fix it")
 
-sig = dspy.Signature('message:str -> report:BugReport')
+# Multiple inputs AND outputs
+sig = dspy.Signature(
+    "code: str, context: str -> bugs: list[BugReport], summary: str",
+    "Analyze code for bugs and provide a summary"
+)
+
 agent = CodexAgent(sig, working_directory=".")
+result = agent(
+    code="def divide(a, b): return a / b",
+    context="Production calculator module"
+)
 
-result = agent(message="Analyze the bug in error.log")
-print(result.report.severity)  # Typed access!
-print(result.report.affected_files)
+print(result.summary)           # str
+print(result.bugs)              # list[BugReport]
+print(result.bugs[0].severity)  # Typed access!
 ```
+
+## How It Works: Two-Turn Pattern
+
+Unlike forcing JSON output during task execution (which pushes models out of distribution), CodexAgent uses a **two-turn pattern**:
+
+### Turn 1: Natural Task Execution
+
+The agent receives a natural prompt and does its work freely:
+
+```
+As input, you are provided with:
+1. `code` (str): Source code to analyze
+2. `context` (str): Additional context
+
+Your task is to produce:
+1. `bugs` (list[BugReport]): Bugs found in the code
+2. `summary` (str): Overall analysis summary
+
+Instructions: Analyze code for bugs and provide a summary
+
+---
+
+code: def divide(a, b): return a / b
+
+context: Production calculator module
+```
+
+The agent reads files, runs commands, reasons naturally - no JSON pressure.
+
+### Turn 2: Structured Extraction
+
+After the task completes, the agent formats its findings:
+
+```
+Now provide your findings in the following format:
+
+[[ ## bugs ## ]]
+[
+  {
+    # Bug severity
+    severity: "low" or "medium" or "high",
+    # File and line number
+    location: string,
+    # What the bug does
+    description: string,
+    # How to fix it
+    suggested_fix: string,
+  }
+]
+
+[[ ## summary ## ]]
+<string>
+
+[[ ## completed ## ]]
+```
+
+This separation keeps the agent in-distribution during the actual work.
 
 ## API Reference
 
@@ -68,7 +135,7 @@ print(result.report.affected_files)
 class CodexAgent(dspy.Module):
     def __init__(
         self,
-        signature: str | type[Signature],
+        signature: str | type[Signature],  # Any number of input/output fields
         working_directory: str,
         model: Optional[str] = None,
         sandbox_mode: Optional[SandboxMode] = None,
@@ -81,456 +148,274 @@ class CodexAgent(dspy.Module):
 
 #### Parameters
 
-**Required:**
-
-- **`signature`** (`str | type[Signature]`)
-  - DSPy signature defining input/output fields
-  - Must have exactly 1 input field and 1 output field
-  - Examples:
-    - String format: `'message:str -> answer:str'`
-    - Class format: `MySignature` (subclass of `dspy.Signature`)
-
-- **`working_directory`** (`str`)
-  - Directory where Codex agent will execute commands
-  - Must be a git repository (unless `skip_git_repo_check=True`)
-  - Example: `"."`, `"/path/to/project"`
-
-**Optional:**
-
-- **`model`** (`Optional[str]`)
-  - Model to use for generation
-  - Examples: `"gpt-4"`, `"gpt-4-turbo"`, `"gpt-4o"`
-  - Default: Codex SDK default (typically latest GPT-4)
-
-- **`sandbox_mode`** (`Optional[SandboxMode]`)
-  - Controls what operations the agent can perform
-  - Options:
-    - `SandboxMode.READ_ONLY` - No file modifications (safest)
-    - `SandboxMode.WORKSPACE_WRITE` - Can modify files in workspace
-    - `SandboxMode.DANGER_FULL_ACCESS` - Full system access
-  - Default: Determined by Codex SDK
-
-- **`skip_git_repo_check`** (`bool`)
-  - Allow non-git directories as `working_directory`
-  - Default: `False`
-
-- **`api_key`** (`Optional[str]`)
-  - OpenAI API key
-  - Falls back to `CODEX_API_KEY` environment variable
-  - Default: `None` (uses env var)
-
-- **`base_url`** (`Optional[str]`)
-  - OpenAI API base URL (for custom endpoints)
-  - Falls back to `OPENAI_BASE_URL` environment variable
-  - Default: `None` (uses official OpenAI endpoint)
-
-- **`codex_path_override`** (`Optional[str]`)
-  - Override path to codex binary
-  - Useful for testing or custom installations
-  - Example: `"/opt/homebrew/bin/codex"`
-  - Default: `None` (SDK auto-discovers)
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `signature` | `str \| type[Signature]` | DSPy signature with any number of input/output fields |
+| `working_directory` | `str` | Directory where agent executes commands |
+| `model` | `Optional[str]` | Model name (e.g., "gpt-4", "gpt-4-turbo") |
+| `sandbox_mode` | `Optional[SandboxMode]` | `READ_ONLY`, `WORKSPACE_WRITE`, or `DANGER_FULL_ACCESS` |
+| `skip_git_repo_check` | `bool` | Allow non-git directories |
+| `api_key` | `Optional[str]` | OpenAI API key (falls back to `CODEX_API_KEY` env) |
+| `base_url` | `Optional[str]` | API base URL (falls back to `OPENAI_BASE_URL` env) |
+| `codex_path_override` | `Optional[str]` | Override path to codex binary |
 
 #### Methods
 
 ##### `forward(**kwargs) -> Prediction`
 
-Execute the agent with an input message.
+Execute the agent with all input fields.
 
-**Arguments:**
-- `**kwargs` - Must contain the input field specified in signature
+**Returns** a `Prediction` with:
+- All output fields (typed according to signature)
+- `trace` - `list[ThreadItem]` - Execution items (commands, files, etc.)
+- `usage` - `Usage` - Token counts
 
-**Returns:**
-- `Prediction` object with:
-  - **Typed output field** - Named according to signature (e.g., `result.answer`)
-  - **`trace`** - `list[ThreadItem]` - Chronological execution items
-  - **`usage`** - `Usage` - Token counts
+### CodexAdapter
 
-**Example:**
+The adapter that formats prompts. You usually don't need to use this directly, but it's available:
+
 ```python
-result = agent(message="Hello")
-print(result.answer)     # Access typed output
-print(result.trace)      # List of execution items
-print(result.usage)      # Token usage stats
-```
+from codex_dspy import CodexAdapter
 
-#### Properties
+adapter = CodexAdapter()
 
-##### `thread_id: Optional[str]`
+# Format Turn 1 (task)
+turn1 = adapter.format_turn1(signature, inputs)
 
-Get the thread ID for this agent instance.
+# Format Turn 2 (extraction with BAML-style markers)
+turn2 = adapter.format_turn2(signature)
 
-- Returns `None` until first `forward()` call
-- Persists across multiple `forward()` calls
-- Useful for debugging and logging
+# Or Turn 2 with JSON schema
+turn2_json = adapter.format_turn2_json(signature)
 
-**Example:**
-```python
-agent = CodexAgent(sig, working_directory=".")
-print(agent.thread_id)  # None
-
-result = agent(message="Hello")
-print(agent.thread_id)  # '0199e95f-2689-7501-a73d-038d77dd7320'
+# Parse [[ ## field ## ]] markers from response
+parsed = adapter.parse(signature, completion)
 ```
 
 ## Usage Patterns
 
-### Pattern 1: Multi-turn Conversation
+### Pattern 1: Multi-Turn Conversation
 
 Each agent instance maintains a stateful thread:
 
 ```python
 agent = CodexAgent(sig, working_directory=".")
 
-# Turn 1
-result1 = agent(message="What's the main bug?")
-print(result1.answer)
+# Turn 1 - agent does work
+result1 = agent(code="...", context="...")
+print(result1.summary)
 
-# Turn 2 - has context from Turn 1
-result2 = agent(message="How do we fix it?")
-print(result2.answer)
+# Turn 2 - has full context from Turn 1
+result2 = agent(code="...", context="Now fix the bugs you found")
+print(result2.summary)
 
-# Turn 3 - has context from Turn 1 + 2
-result3 = agent(message="Write tests for the fix")
-print(result3.answer)
-
-# All use same thread_id
+# Same thread throughout
 print(agent.thread_id)
 ```
 
-### Pattern 2: Fresh Context
-
-Want a new conversation? Create a new agent:
+### Pattern 2: Complex Multi-Field Analysis
 
 ```python
-# Agent 1 - Task A
-agent1 = CodexAgent(sig, working_directory=".")
-result1 = agent1(message="Analyze bug in module A")
+class SecurityAudit(BaseModel):
+    vulnerabilities: list[Vulnerability]
+    risk_score: float = Field(description="0-10 risk score")
+    recommendations: list[str]
 
-# Agent 2 - Task B (no context from Agent 1)
-agent2 = CodexAgent(sig, working_directory=".")
-result2 = agent2(message="Analyze bug in module B")
+class TestCoverage(BaseModel):
+    covered_functions: list[str]
+    uncovered_functions: list[str]
+    coverage_percent: float
+
+sig = dspy.Signature(
+    "codebase: str, focus_areas: list[str] -> "
+    "security: SecurityAudit, tests: TestCoverage, report: str",
+    "Perform security audit and test coverage analysis"
+)
+
+agent = CodexAgent(sig, working_directory="/path/to/project")
+result = agent(
+    codebase="src/",
+    focus_areas=["authentication", "data validation"]
+)
+
+print(f"Risk Score: {result.security.risk_score}")
+print(f"Coverage: {result.tests.coverage_percent}%")
+print(f"Report:\n{result.report}")
 ```
 
-### Pattern 3: Output Field Descriptions
-
-Enhance prompts with field descriptions:
-
-```python
-class MySignature(dspy.Signature):
-    """Analyze code architecture."""
-
-    message: str = dspy.InputField()
-    analysis: str = dspy.OutputField(
-        desc="A detailed markdown report with sections: "
-        "1) Architecture overview, 2) Key components, 3) Dependencies"
-    )
-
-agent = CodexAgent(MySignature, working_directory=".")
-result = agent(message="Analyze this codebase")
-
-# The description is automatically appended to the prompt:
-# "Analyze this codebase\n\n
-#  Please produce the following output: A detailed markdown report..."
-```
-
-### Pattern 4: Inspecting Execution Trace
-
-Access detailed execution information:
+### Pattern 3: Inspecting Execution Trace
 
 ```python
 from codex import CommandExecutionItem, FileChangeItem
 
-result = agent(message="Fix the bug")
+result = agent(code="...", context="Fix the bug")
 
-# Filter trace by type
+# What commands ran?
 commands = [item for item in result.trace if isinstance(item, CommandExecutionItem)]
 for cmd in commands:
-    print(f"Command: {cmd.command}")
-    print(f"Exit code: {cmd.exit_code}")
-    print(f"Output: {cmd.aggregated_output}")
+    print(f"$ {cmd.command}")
+    print(f"  Exit: {cmd.exit_code}")
 
+# What files changed?
 files = [item for item in result.trace if isinstance(item, FileChangeItem)]
-for file_item in files:
-    for change in file_item.changes:
-        print(f"{change.kind}: {change.path}")
+for f in files:
+    for change in f.changes:
+        print(f"  {change.kind}: {change.path}")
 ```
 
-### Pattern 5: Token Usage Tracking
-
-Monitor API usage:
-
-```python
-result = agent(message="...")
-
-print(f"Input tokens: {result.usage.input_tokens}")
-print(f"Cached tokens: {result.usage.cached_input_tokens}")
-print(f"Output tokens: {result.usage.output_tokens}")
-print(f"Total: {result.usage.input_tokens + result.usage.output_tokens}")
-```
-
-### Pattern 6: Safe Execution with Sandbox
-
-Control what the agent can do:
+### Pattern 4: Safe Execution with Sandbox
 
 ```python
 from codex import SandboxMode
 
-# Read-only (safest)
-agent = CodexAgent(
-    sig,
-    working_directory=".",
-    sandbox_mode=SandboxMode.READ_ONLY
-)
+# Read-only (safest - for analysis tasks)
+agent = CodexAgent(sig, working_directory=".", sandbox_mode=SandboxMode.READ_ONLY)
 
-# Can modify files in workspace
-agent = CodexAgent(
-    sig,
-    working_directory=".",
-    sandbox_mode=SandboxMode.WORKSPACE_WRITE
-)
+# Can modify workspace (for fix/refactor tasks)
+agent = CodexAgent(sig, working_directory=".", sandbox_mode=SandboxMode.WORKSPACE_WRITE)
 
-# Full system access (use with caution!)
-agent = CodexAgent(
-    sig,
-    working_directory=".",
-    sandbox_mode=SandboxMode.DANGER_FULL_ACCESS
-)
+# Full access (use with caution!)
+agent = CodexAgent(sig, working_directory=".", sandbox_mode=SandboxMode.DANGER_FULL_ACCESS)
 ```
 
 ## Advanced Examples
 
-### Example 1: Code Review Agent
+### Code Review with Multiple Outputs
 
 ```python
-from pydantic import BaseModel, Field
-from codex import SandboxMode
+class Issue(BaseModel):
+    severity: Literal["critical", "high", "medium", "low"]
+    file: str
+    line: int
+    description: str
+    suggestion: str
 
-class CodeReview(BaseModel):
-    summary: str = Field(description="High-level summary")
-    issues: list[str] = Field(description="List of issues found")
-    severity: str = Field(description="overall, critical, or info")
-    recommendations: list[str] = Field(description="Actionable recommendations")
+class ReviewResult(BaseModel):
+    approved: bool
+    issues: list[Issue]
 
-sig = dspy.Signature('message:str -> review:CodeReview')
-
-agent = CodexAgent(
-    sig,
-    working_directory="/path/to/project",
-    model="gpt-4",
-    sandbox_mode=SandboxMode.READ_ONLY,
+sig = dspy.Signature(
+    "diff: str, guidelines: str -> review: ReviewResult, summary: str",
+    "Review code changes against guidelines"
 )
 
-result = agent(message="Review the changes in src/main.py")
+agent = CodexAgent(sig, working_directory=".", sandbox_mode=SandboxMode.READ_ONLY)
 
-print(f"Severity: {result.review.severity}")
-for issue in result.review.issues:
-    print(f"- {issue}")
+result = agent(
+    diff=open("changes.diff").read(),
+    guidelines="No hardcoded secrets. All functions must have docstrings."
+)
+
+if not result.review.approved:
+    print("Review failed!")
+    for issue in result.review.issues:
+        print(f"  [{issue.severity}] {issue.file}:{issue.line}")
+        print(f"    {issue.description}")
+        print(f"    Suggestion: {issue.suggestion}")
 ```
 
-### Example 2: Repository Analysis Pipeline
+### Repository Analysis Pipeline
 
 ```python
+# Step 1: Gather stats
 class RepoStats(BaseModel):
     total_files: int
-    languages: list[str]
-    test_coverage: str
+    languages: dict[str, int]  # language -> file count
+    largest_files: list[str]
 
-class ArchitectureNotes(BaseModel):
-    components: list[str]
-    design_patterns: list[str]
+stats_agent = CodexAgent(
+    dspy.Signature("path: str -> stats: RepoStats"),
+    working_directory="."
+)
+stats = stats_agent(path=".").stats
+
+# Step 2: Architecture analysis (uses stats as context)
+class Component(BaseModel):
+    name: str
+    responsibility: str
     dependencies: list[str]
 
-# Agent 1: Gather stats
-stats_sig = dspy.Signature('message:str -> stats:RepoStats')
-stats_agent = CodexAgent(stats_sig, working_directory=".")
-stats = stats_agent(message="Analyze repository statistics").stats
-
-# Agent 2: Architecture analysis
-arch_sig = dspy.Signature('message:str -> notes:ArchitectureNotes')
-arch_agent = CodexAgent(arch_sig, working_directory=".")
+arch_agent = CodexAgent(
+    dspy.Signature("repo_info: str -> components: list[Component], diagram: str"),
+    working_directory="."
+)
 arch = arch_agent(
-    message=f"Analyze architecture. Context: {stats.total_files} files, "
-            f"languages: {', '.join(stats.languages)}"
-).notes
-
-print(f"Components: {arch.components}")
-print(f"Patterns: {arch.design_patterns}")
-```
-
-### Example 3: Iterative Debugging
-
-```python
-sig = dspy.Signature('message:str -> response:str')
-agent = CodexAgent(
-    sig,
-    working_directory=".",
-    sandbox_mode=SandboxMode.WORKSPACE_WRITE,
-    model="gpt-4-turbo",
+    repo_info=f"Languages: {stats.languages}, Files: {stats.total_files}"
 )
 
-# Turn 1: Find the bug
-result1 = agent(message="Find the bug in src/calculator.py")
-print(result1.response)
-
-# Turn 2: Propose a fix
-result2 = agent(message="What's the best way to fix it?")
-print(result2.response)
-
-# Turn 3: Implement the fix
-result3 = agent(message="Implement the fix")
-print(result3.response)
-
-# Turn 4: Write tests
-result4 = agent(message="Write tests for the fix")
-print(result4.response)
-
-# Check what files were modified
-from codex import FileChangeItem
-for item in result3.trace + result4.trace:
-    if isinstance(item, FileChangeItem):
-        for change in item.changes:
-            print(f"Modified: {change.path}")
+print("Components:")
+for comp in arch.components:
+    print(f"  {comp.name}: {comp.responsibility}")
+print(f"\nDiagram:\n{arch.diagram}")
 ```
 
 ## Trace Item Types
 
-When accessing `result.trace`, you'll see various item types:
-
-| Type | Fields | Description |
-|------|--------|-------------|
-| `AgentMessageItem` | `id`, `text` | Agent's text response |
-| `ReasoningItem` | `id`, `text` | Agent's internal reasoning |
-| `CommandExecutionItem` | `id`, `command`, `aggregated_output`, `status`, `exit_code` | Shell command execution |
-| `FileChangeItem` | `id`, `changes`, `status` | File modifications (add/update/delete) |
-| `McpToolCallItem` | `id`, `server`, `tool`, `status` | MCP tool invocation |
-| `WebSearchItem` | `id`, `query` | Web search performed |
-| `TodoListItem` | `id`, `items` | Task list created |
-| `ErrorItem` | `id`, `message` | Error that occurred |
-
-## How It Works
-
-### Signature  Codex Flow
-
-```
-1. Define signature: 'message:str -> answer:str'
-   
-2. CodexAgent validates (must have 1 input, 1 output)
-   
-3. __init__ creates Codex client + starts thread
-   
-4. forward(message="...") extracts message
-   
-5. If output field has desc  append to message
-   
-6. If output type ` str  generate JSON schema
-   
-7. Call thread.run(message, schema)
-   
-8. Parse response (JSON if Pydantic, str otherwise)
-   
-9. Return Prediction(output=..., trace=..., usage=...)
-```
-
-### Output Type Handling
-
-**String output:**
-```python
-sig = dspy.Signature('message:str -> answer:str')
-# No schema passed to Codex
-# Response used as-is
-```
-
-**Pydantic output:**
-```python
-sig = dspy.Signature('message:str -> report:BugReport')
-# JSON schema generated from BugReport
-# Schema passed to Codex with additionalProperties: false
-# Response parsed with BugReport.model_validate_json()
-```
-
-## Troubleshooting
-
-### Error: "CodexAgent requires exactly 1 input field"
-
-Your signature has too many or too few fields. CodexAgent expects exactly one input and one output:
-
-```python
-# L Wrong - multiple inputs
-sig = dspy.Signature('context:str, question:str -> answer:str')
-
-#  Correct - single input
-sig = dspy.Signature('message:str -> answer:str')
-```
-
-### Error: "Failed to parse Codex response as MyModel"
-
-The model returned JSON that doesn't match your Pydantic schema. Check:
-1. Schema is valid and clear
-2. Field descriptions are helpful
-3. Model has enough context to generate correct structure
-
-### Error: "No such file or directory: codex"
-
-Set `codex_path_override`:
-
-```python
-agent = CodexAgent(
-    sig,
-    working_directory=".",
-    codex_path_override="/opt/homebrew/bin/codex"
-)
-```
-
-### Working directory must be a git repo
-
-Either:
-1. Use a git repository, or
-2. Set `skip_git_repo_check=True`:
-
-```python
-agent = CodexAgent(
-    sig,
-    working_directory="/tmp/mydir",
-    skip_git_repo_check=True
-)
-```
+| Type | Description |
+|------|-------------|
+| `AgentMessageItem` | Agent's text response |
+| `ReasoningItem` | Agent's internal reasoning |
+| `CommandExecutionItem` | Shell command execution |
+| `FileChangeItem` | File modifications |
+| `McpToolCallItem` | MCP tool invocation |
+| `WebSearchItem` | Web search performed |
+| `TodoListItem` | Task list created |
+| `ErrorItem` | Error that occurred |
 
 ## Design Philosophy
 
-### Why 1 input, 1 output?
+### Why Two-Turn Pattern?
 
-CodexAgent is designed for conversational agentic workflows. The input is always a message/prompt, and the output is always a response. This keeps the interface simple and predictable.
+Traditional structured output forces the model to think about JSON formatting while doing complex agentic work. This is out-of-distribution - models are trained to reason naturally, then format at the end.
 
-For complex inputs, compose them into the message:
+Our two-turn pattern:
+1. **Turn 1**: Agent works naturally (reads files, runs commands, reasons)
+2. **Turn 2**: Agent formats findings into structure (quick, focused)
 
-```python
-# Instead of: 'context:str, question:str -> answer:str'
-message = f"Context: {context}\n\nQuestion: {question}"
-result = agent(message=message)
+This keeps the agent in-distribution during the actual work.
+
+### Why Multi-Field Support?
+
+Real agentic tasks often need:
+- Multiple inputs (code + context + config)
+- Multiple outputs (analysis + recommendations + confidence)
+
+Single-field signatures force awkward workarounds. Multi-field signatures are declarative and type-safe.
+
+### Why Stateful Threads?
+
+Agents often need multi-turn context ("fix the bug" → "write tests for it"). Stateful threads make this natural. Want fresh context? Create a new agent instance.
+
+## Development
+
+```bash
+# Install dev dependencies
+uv sync --extra dev
+
+# Run tests
+uv run pytest
+
+# Run pre-commit hooks
+uv run pre-commit run --all-files
 ```
 
-### Why stateful threads?
+### Test Structure
 
-Agents often need multi-turn context (e.g., "fix the bug"  "write tests for it"). Stateful threads make this natural without manual history management.
+Tests are co-located in `src/tests/unit/`. The pre-commit hook enforces this:
 
-Want fresh context? Create a new agent instance.
-
-### Why return trace + usage?
-
-Observability is critical for agentic systems. You need to know:
-- What commands ran
-- What files changed
-- How many tokens were used
-- What the agent was thinking
-
-The trace provides full visibility into agent execution.
+```
+src/
+├── codex_dspy/
+│   ├── adapter.py
+│   └── agent.py
+└── tests/
+    └── unit/
+        └── test_adapter.py
+```
 
 ## Contributing
 
-Issues and PRs welcome! This is an experimental integration of Codex SDK with DSPy.
-
-## Roadmap
-- proper signature inputfield handling (maybe outputfields if we can swing it?)
+Issues and PRs welcome!
 
 ## License
 
@@ -538,7 +423,6 @@ See LICENSE file.
 
 ## Related Documentation
 
-- [Codex SDK API Reference](./CODEX_SDK_API_SURFACE.md)
-- [Codex Architecture](./CODEX_ARCHITECTURE.md)
-- [Codex Quick Reference](./CODEX_QUICK_REFERENCE.md)
+- [Codex SDK API Reference](./docs/CODEX_SDK_API_SURFACE.md)
+- [Codex Architecture](./docs/CODEX_ARCHITECTURE.md)
 - [DSPy Documentation](https://dspy-docs.vercel.app/)
