@@ -101,7 +101,7 @@ class CodexAgent(dspy.Module):
     Args:
         signature: DSPy signature with any number of input/output fields
         working_directory: Directory where Codex agent will execute commands
-        model: Model to use (e.g., "gpt-4", "gpt-4-turbo"). Defaults to Codex default.
+        model: Model to use. Defaults to "gpt-5.1-codex-max".
         sandbox_mode: Execution sandbox level (READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS)
         skip_git_repo_check: Allow non-git directories as working_directory
         api_key: OpenAI API key (falls back to CODEX_API_KEY env var)

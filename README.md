@@ -152,7 +152,7 @@ class CodexAgent(dspy.Module):
 |-----------|------|-------------|
 | `signature` | `str \| type[Signature]` | DSPy signature with any number of input/output fields |
 | `working_directory` | `str` | Directory where agent executes commands |
-| `model` | `Optional[str]` | Model name (e.g., "gpt-4", "gpt-4-turbo") |
+| `model` | `Optional[str]` | Model name (default: "gpt-5.1-codex-max") |
 | `sandbox_mode` | `Optional[SandboxMode]` | `READ_ONLY`, `WORKSPACE_WRITE`, or `DANGER_FULL_ACCESS` |
 | `skip_git_repo_check` | `bool` | Allow non-git directories |
 | `api_key` | `Optional[str]` | OpenAI API key (falls back to `CODEX_API_KEY` env) |
