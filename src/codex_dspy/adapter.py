@@ -255,7 +255,7 @@ class CodexAdapter:
                     inner_schema = _build_simplified_schema(inner, indent=1)
                     parts.append(f"[\n{inner_schema}\n]")
                 else:
-                    parts.append(f"{_render_type_str(annotation)}[]")
+                    parts.append(f"{_render_type_str(inner)}[]")
             else:
                 # Primitive or other type
                 parts.append(f"<{_render_type_str(annotation)}>")

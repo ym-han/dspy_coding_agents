@@ -330,6 +330,34 @@ class TestCodexAdapterFormatTurn2:
         assert "[[ ## summary ## ]]" in result
         assert "[[ ## completed ## ]]" in result
 
+    def test_list_primitive_not_double_bracketed(self):
+        """list[str] should render as string[], not string[][]."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"items": (list[str], "List of items")},
+        )
+
+        result = adapter.format_turn2(sig)
+
+        assert "[[ ## items ## ]]" in result
+        # Should be string[], NOT string[][]
+        assert "string[]" in result
+        assert "string[][]" not in result
+
+    def test_list_int_not_double_bracketed(self):
+        """list[int] should render as int[], not int[][]."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"numbers": (list[int], "List of numbers")},
+        )
+
+        result = adapter.format_turn2(sig)
+
+        assert "int[]" in result
+        assert "int[][]" not in result
+
 
 class TestCodexAdapterFormatTurn2Json:
     """Tests for CodexAdapter.format_turn2_json method."""
