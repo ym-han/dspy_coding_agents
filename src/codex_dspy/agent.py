@@ -10,6 +10,7 @@ Uses a two-turn pattern:
 """
 
 import json
+import re
 from typing import Any, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -20,6 +21,25 @@ from dspy.signatures.signature import Signature, ensure_signature
 
 from codex import Codex, CodexOptions, SandboxMode, ThreadOptions, TurnOptions
 from codex_dspy.adapter import CodexAdapter
+
+
+def _strip_json_fences(text: str) -> str:
+    """Strip markdown JSON fences from response if present.
+
+    Handles:
+        ```json\n{...}\n```
+        ```\n{...}\n```
+        {..} (no fences - returned as-is)
+    """
+    text = text.strip()
+
+    # Pattern for ```json ... ``` or ``` ... ```
+    fence_pattern = re.compile(r'^```(?:json)?\s*\n?(.*?)\n?```$', re.DOTALL)
+    match = fence_pattern.match(text)
+    if match:
+        return match.group(1).strip()
+
+    return text
 
 
 def _is_all_str_outputs(signature: Signature) -> bool:
@@ -214,9 +234,10 @@ class CodexAgent(dspy.Module):
 
             extract_result = self.thread.run(turn2_prompt, turn_options)
 
-            # Parse JSON response
+            # Parse JSON response (strip fences if present)
             try:
-                raw_output = json.loads(extract_result.final_response)
+                json_str = _strip_json_fences(extract_result.final_response)
+                raw_output = json.loads(json_str)
             except json.JSONDecodeError as e:
                 raise ValueError(
                     f"Failed to parse JSON response: {e}\n"
