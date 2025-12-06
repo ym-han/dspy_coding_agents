@@ -3,9 +3,11 @@
 Tests helper functions used by CodexAgent.
 """
 
+from typing import Optional
+
 import pytest
 
-from codex_dspy.agent import _strip_json_fences
+from codex_dspy.agent import _combine_usage, _is_all_str_outputs, _strip_json_fences
 
 
 class TestStripJsonFences:
@@ -70,3 +72,109 @@ class TestStripJsonFences:
         """JSON array should work."""
         fenced = '```json\n[1, 2, 3]\n```'
         assert _strip_json_fences(fenced) == '[1, 2, 3]'
+
+
+class TestCombineUsage:
+    """Tests for _combine_usage function."""
+
+    def test_both_none(self):
+        """Both None should return None."""
+        assert _combine_usage(None, None) is None
+
+    def test_first_none(self):
+        """First None should return second."""
+        from codex import Usage
+        usage2 = Usage(input_tokens=100, output_tokens=50, cached_input_tokens=10)
+        result = _combine_usage(None, usage2)
+        assert result is usage2
+
+    def test_second_none(self):
+        """Second None should return first."""
+        from codex import Usage
+        usage1 = Usage(input_tokens=100, output_tokens=50, cached_input_tokens=10)
+        result = _combine_usage(usage1, None)
+        assert result is usage1
+
+    def test_sum_tokens(self):
+        """Both present should sum all token counts."""
+        from codex import Usage
+        usage1 = Usage(input_tokens=100, output_tokens=50, cached_input_tokens=10)
+        usage2 = Usage(input_tokens=200, output_tokens=75, cached_input_tokens=20)
+        result = _combine_usage(usage1, usage2)
+
+        assert result.input_tokens == 300
+        assert result.output_tokens == 125
+        assert result.cached_input_tokens == 30
+
+    def test_handles_zero_values(self):
+        """Zero values should be handled correctly."""
+        from codex import Usage
+        usage1 = Usage(input_tokens=100, output_tokens=0, cached_input_tokens=0)
+        usage2 = Usage(input_tokens=0, output_tokens=50, cached_input_tokens=0)
+        result = _combine_usage(usage1, usage2)
+
+        assert result.input_tokens == 100
+        assert result.output_tokens == 50
+        assert result.cached_input_tokens == 0
+
+
+class MockFieldInfo:
+    """Mock DSPy FieldInfo for testing."""
+    def __init__(self, annotation):
+        self.annotation = annotation
+
+
+class MockSignature:
+    """Mock DSPy Signature for testing."""
+    def __init__(self, output_fields: dict):
+        self.output_fields = {k: MockFieldInfo(v) for k, v in output_fields.items()}
+
+
+class TestIsAllStrOutputs:
+    """Tests for _is_all_str_outputs function."""
+
+    def test_single_str(self):
+        """Single str output should return True."""
+        sig = MockSignature({"answer": str})
+        assert _is_all_str_outputs(sig) is True
+
+    def test_multiple_str(self):
+        """Multiple str outputs should return True."""
+        sig = MockSignature({"answer": str, "summary": str})
+        assert _is_all_str_outputs(sig) is True
+
+    def test_optional_str_typing_union(self):
+        """Optional[str] (typing.Union) should return True."""
+        from typing import Union
+        sig = MockSignature({"answer": Union[str, None]})
+        assert _is_all_str_outputs(sig) is True
+
+    def test_optional_str_pep604(self):
+        """str | None (PEP 604) should return True."""
+        sig = MockSignature({"answer": str | None})
+        assert _is_all_str_outputs(sig) is True
+
+    def test_mixed_str_and_optional_str(self):
+        """Mix of str and str | None should return True."""
+        sig = MockSignature({"answer": str, "notes": str | None})
+        assert _is_all_str_outputs(sig) is True
+
+    def test_int_output(self):
+        """Non-str output should return False."""
+        sig = MockSignature({"count": int})
+        assert _is_all_str_outputs(sig) is False
+
+    def test_pydantic_output(self):
+        """Pydantic model output should return False."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+
+        sig = MockSignature({"result": MyModel})
+        assert _is_all_str_outputs(sig) is False
+
+    def test_list_str_output(self):
+        """list[str] should return False (not plain str)."""
+        sig = MockSignature({"items": list[str]})
+        assert _is_all_str_outputs(sig) is False

@@ -11,6 +11,7 @@ Uses a two-turn pattern:
 
 import json
 import re
+import types
 from typing import Any, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -21,6 +22,31 @@ from dspy.signatures.signature import Signature, ensure_signature
 
 from codex import Codex, CodexOptions, SandboxMode, ThreadOptions, TurnOptions
 from codex_dspy.adapter import CodexAdapter
+
+
+def _combine_usage(usage1, usage2):
+    """Combine token usage from two turns.
+
+    Args:
+        usage1: Usage from first turn (may be None)
+        usage2: Usage from second turn (may be None)
+
+    Returns:
+        Combined usage with summed token counts, or whichever is not None
+    """
+    if usage1 is None:
+        return usage2
+    if usage2 is None:
+        return usage1
+
+    # Both exist - sum the token counts
+    # Create a new usage-like object with combined counts
+    from codex import Usage
+    return Usage(
+        input_tokens=(usage1.input_tokens or 0) + (usage2.input_tokens or 0),
+        output_tokens=(usage1.output_tokens or 0) + (usage2.output_tokens or 0),
+        cached_input_tokens=(usage1.cached_input_tokens or 0) + (usage2.cached_input_tokens or 0),
+    )
 
 
 def _strip_json_fences(text: str) -> str:
@@ -49,7 +75,8 @@ def _is_all_str_outputs(signature: Signature) -> bool:
         if annotation == str:
             continue
         origin = get_origin(annotation)
-        if origin is Union:
+        # Handle both typing.Union and types.UnionType (PEP 604: str | None)
+        if origin is Union or origin is types.UnionType:
             args = get_args(annotation)
             if len(args) == 2 and str in args and type(None) in args:
                 continue
@@ -215,16 +242,10 @@ class CodexAgent(dspy.Module):
                 extract_result = self.thread.run(turn2_prompt)
                 parsed = self.adapter.parse(self.signature, extract_result.final_response)
 
-                # Combine usage from both turns
-                combined_usage = task_result.usage
-                if extract_result.usage:
-                    # Add extraction usage to task usage
-                    combined_usage = extract_result.usage
-
                 return Prediction(
                     **parsed,
                     trace=task_result.items + extract_result.items,
-                    usage=combined_usage,
+                    usage=_combine_usage(task_result.usage, extract_result.usage),
                 )
         else:
             # Need structured output - Turn 2 with JSON schema
@@ -268,13 +289,10 @@ class CodexAgent(dspy.Module):
                 else:
                     parsed_outputs[name] = value
 
-            # Combine traces and return
-            combined_usage = extract_result.usage or task_result.usage
-
             return Prediction(
                 **parsed_outputs,
                 trace=task_result.items + extract_result.items,
-                usage=combined_usage,
+                usage=_combine_usage(task_result.usage, extract_result.usage),
             )
 
     @property
