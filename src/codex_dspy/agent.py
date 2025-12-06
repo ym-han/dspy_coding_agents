@@ -68,6 +68,70 @@ def _strip_json_fences(text: str) -> str:
     return text
 
 
+def _parse_output_value(value: Any, annotation: type) -> Any:
+    """Parse a single output value according to its type annotation.
+
+    Handles:
+    - None values (pass through)
+    - list[PydanticModel] - validate each element
+    - list[Model | None] - validate dicts, keep Nones
+    - Model | None - validate if dict, pass through if None
+    - Direct PydanticModel - validate dict
+    - Primitives and other types - pass through
+
+    Args:
+        value: The raw value from JSON
+        annotation: The type annotation for this field
+
+    Returns:
+        The parsed/validated value
+    """
+    if value is None:
+        return None
+
+    origin = get_origin(annotation)
+
+    # Handle list types
+    if origin is list:
+        inner_type = get_args(annotation)[0] if get_args(annotation) else None
+        if inner_type and isinstance(value, list):
+            # Check if inner type is Optional[Model] (Model | None)
+            inner_origin = get_origin(inner_type)
+            if inner_origin is Union or inner_origin is types.UnionType:
+                inner_args = get_args(inner_type)
+                # Find the non-None type
+                model_type = next((a for a in inner_args if a is not type(None)), None)
+                if model_type and hasattr(model_type, "model_validate"):
+                    # list[Model | None] - validate dicts, keep Nones
+                    return [
+                        model_type.model_validate(v) if isinstance(v, dict) else v
+                        for v in value
+                    ]
+            # Check if inner type is a direct Pydantic model
+            elif hasattr(inner_type, "model_validate"):
+                return [inner_type.model_validate(v) for v in value]
+        return value
+
+    # Handle Optional[Model] (Model | None) - PEP 604 style
+    if origin is Union or origin is types.UnionType:
+        args = get_args(annotation)
+        if type(None) in args:
+            # Find the non-None type
+            model_type = next((a for a in args if a is not type(None)), None)
+            if model_type and hasattr(model_type, "model_validate") and isinstance(value, dict):
+                return model_type.model_validate(value)
+        return value
+
+    # Handle direct Pydantic model
+    if hasattr(annotation, "model_validate"):
+        if isinstance(value, dict):
+            return annotation.model_validate(value)
+        return value
+
+    # Primitives and other types - pass through
+    return value
+
+
 def _is_all_str_outputs(signature: Signature) -> bool:
     """Check if all output fields are str or Optional[str]."""
     for field in signature.output_fields.values():
@@ -267,29 +331,11 @@ class CodexAgent(dspy.Module):
                     f"Response: {extract_result.final_response[:500]}"
                 ) from e
 
-            # Convert to typed outputs
+            # Convert to typed outputs using centralized parsing logic
             parsed_outputs = {}
             for name, field in self.signature.output_fields.items():
                 value = raw_output.get(name)
-                annotation = field.annotation
-
-                if value is None:
-                    parsed_outputs[name] = None
-                elif get_origin(annotation) is list:
-                    # Check for list[PydanticModel] - must check BEFORE direct model check
-                    inner_type = get_args(annotation)[0] if get_args(annotation) else None
-                    if inner_type and hasattr(inner_type, "model_validate") and isinstance(value, list):
-                        parsed_outputs[name] = [inner_type.model_validate(v) for v in value]
-                    else:
-                        parsed_outputs[name] = value
-                elif hasattr(annotation, "model_validate"):
-                    # Direct Pydantic model
-                    if isinstance(value, dict):
-                        parsed_outputs[name] = annotation.model_validate(value)
-                    else:
-                        parsed_outputs[name] = value
-                else:
-                    parsed_outputs[name] = value
+                parsed_outputs[name] = _parse_output_value(value, field.annotation)
 
             return Prediction(
                 **parsed_outputs,
