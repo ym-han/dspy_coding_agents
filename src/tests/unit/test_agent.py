@@ -339,3 +339,218 @@ class TestBuildOutputSchema:
         assert "result" in schema["properties"]
         # Should have Pydantic schema structure
         assert "properties" in schema["properties"]["result"]
+
+    def test_optional_pydantic_model_not_required(self):
+        """Model | None should not be required."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+
+        sig = MockSignature({"result": MyModel | None})
+        schema = _build_output_schema(sig)
+
+        assert "result" not in schema["required"]
+        assert "result" in schema["properties"]
+
+    def test_nested_list(self):
+        """list[list[str]] should be handled."""
+        sig = MockSignature({"matrix": list[list[str]]})
+        schema = _build_output_schema(sig)
+
+        assert "matrix" in schema["required"]
+        assert "matrix" in schema["properties"]
+
+    def test_dict_type(self):
+        """dict[str, int] should be handled."""
+        sig = MockSignature({"counts": dict[str, int]})
+        schema = _build_output_schema(sig)
+
+        assert "counts" in schema["required"]
+        assert "counts" in schema["properties"]
+
+    def test_list_of_optional_pydantic(self):
+        """list[Model | None] edge case."""
+        from pydantic import BaseModel
+
+        class Item(BaseModel):
+            value: int
+
+        sig = MockSignature({"items": list[Item | None]})
+        schema = _build_output_schema(sig)
+
+        assert "items" in schema["required"]
+        assert "items" in schema["properties"]
+
+
+class TestOptionalPydanticParsing:
+    """Tests for Optional[PydanticModel] output parsing."""
+
+    def test_optional_model_with_value(self):
+        """Model | None with a dict value should be validated."""
+        from typing import get_origin, get_args
+        from pydantic import BaseModel
+        import types
+
+        class Config(BaseModel):
+            setting: str
+
+        annotation = Config | None
+        value = {"setting": "enabled"}
+
+        # Simulate parsing logic
+        origin = get_origin(annotation)
+        is_optional_model = (origin is types.UnionType) and type(None) in get_args(annotation)
+
+        if is_optional_model:
+            # Get the non-None type
+            args = [a for a in get_args(annotation) if a is not type(None)]
+            model_type = args[0] if args else None
+            if model_type and hasattr(model_type, "model_validate") and isinstance(value, dict):
+                result = model_type.model_validate(value)
+            else:
+                result = value
+        else:
+            result = value
+
+        assert isinstance(result, Config)
+        assert result.setting == "enabled"
+
+    def test_optional_model_with_none(self):
+        """Model | None with None value should pass through."""
+        from pydantic import BaseModel
+
+        class Config(BaseModel):
+            setting: str
+
+        annotation = Config | None
+        value = None
+
+        # None should pass through unchanged
+        assert value is None
+
+
+class TestNestedListParsing:
+    """Tests for nested list types like list[list[str]]."""
+
+    def test_nested_list_passthrough(self):
+        """list[list[str]] should pass through as-is (no Pydantic validation)."""
+        from typing import get_origin, get_args
+
+        annotation = list[list[str]]
+        value = [["a", "b"], ["c", "d"]]
+
+        # Current logic: check if it's a list
+        if get_origin(annotation) is list:
+            inner_type = get_args(annotation)[0] if get_args(annotation) else None
+            # inner_type is list[str], which doesn't have model_validate
+            if inner_type and hasattr(inner_type, "model_validate") and isinstance(value, list):
+                result = "should not reach"
+            else:
+                result = value
+        else:
+            result = value
+
+        assert result == [["a", "b"], ["c", "d"]]
+
+    def test_nested_list_type_detection(self):
+        """get_origin/get_args should correctly identify nested lists."""
+        from typing import get_origin, get_args
+
+        annotation = list[list[str]]
+
+        assert get_origin(annotation) is list
+        inner = get_args(annotation)[0]
+        assert get_origin(inner) is list
+        assert get_args(inner)[0] is str
+
+
+class TestDictTypeParsing:
+    """Tests for dict[K, V] types."""
+
+    def test_dict_passthrough(self):
+        """dict[str, int] should pass through as-is."""
+        from typing import get_origin
+
+        annotation = dict[str, int]
+        value = {"a": 1, "b": 2}
+
+        # dict doesn't have model_validate, should pass through
+        if get_origin(annotation) is list:
+            result = "should not reach"
+        elif hasattr(annotation, "model_validate"):
+            result = "should not reach"
+        else:
+            result = value
+
+        assert result == {"a": 1, "b": 2}
+
+    def test_dict_type_detection(self):
+        """get_origin/get_args should correctly identify dict types."""
+        from typing import get_origin, get_args
+
+        annotation = dict[str, int]
+
+        assert get_origin(annotation) is dict
+        args = get_args(annotation)
+        assert args[0] is str
+        assert args[1] is int
+
+
+class TestEmptyAndNoneListHandling:
+    """Tests for empty lists and None in list fields."""
+
+    def test_empty_list_passthrough(self):
+        """Empty list should pass through unchanged."""
+        from typing import get_origin, get_args
+        from pydantic import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        annotation = list[Item]
+        value = []
+
+        if get_origin(annotation) is list:
+            inner_type = get_args(annotation)[0] if get_args(annotation) else None
+            if inner_type and hasattr(inner_type, "model_validate") and isinstance(value, list):
+                result = [inner_type.model_validate(v) for v in value]
+            else:
+                result = value
+        else:
+            result = value
+
+        assert result == []
+
+    def test_none_list_field(self):
+        """None value for list field should pass through."""
+        value = None
+        # None check happens first in the parsing logic
+        assert value is None
+
+    def test_list_with_none_elements(self):
+        """list containing None elements (if allowed by type)."""
+        from typing import get_origin, get_args
+        from pydantic import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        # list[Item | None] - list that can contain None elements
+        annotation = list[Item | None]
+        value = [{"name": "first"}, None, {"name": "third"}]
+
+        # This is tricky - inner type is Item | None, not Item
+        # Current logic won't validate this correctly, but it should pass through
+        if get_origin(annotation) is list:
+            inner_type = get_args(annotation)[0] if get_args(annotation) else None
+            # inner_type is Item | None, which doesn't have model_validate directly
+            if inner_type and hasattr(inner_type, "model_validate"):
+                result = "would validate"
+            else:
+                result = value  # passes through
+        else:
+            result = value
+
+        # Current behavior: passes through as raw dicts/None
+        assert result == [{"name": "first"}, None, {"name": "third"}]

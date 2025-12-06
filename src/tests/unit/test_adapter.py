@@ -117,6 +117,28 @@ class TestRenderTypeStr:
         assert "age: int," in result
         assert "]" in result
 
+    def test_nested_list(self):
+        """list[list[str]] should render correctly."""
+        result = _render_type_str(list[list[str]])
+        assert "string[][]" in result
+
+    def test_dict_type(self):
+        """dict[str, int] should render as dict."""
+        result = _render_type_str(dict[str, int])
+        # dict types fall back to type name
+        assert "dict" in result.lower()
+
+    def test_optional_pydantic_model(self):
+        """Model | None should render with null option."""
+        result = _render_type_str(SimpleModel | None)
+        assert "null" in result
+
+    def test_list_of_optional(self):
+        """list[str | None] should render correctly."""
+        result = _render_type_str(list[str | None])
+        # Inner type is str | None
+        assert "[]" in result
+
 
 class TestBuildSimplifiedSchema:
     """Tests for _build_simplified_schema function."""
@@ -463,3 +485,75 @@ The actual answer.
         result = adapter.parse(sig, completion)
 
         assert result["value"] == "inline content"
+
+
+class TestEdgeCaseTypes:
+    """Tests for edge case type handling across the adapter."""
+
+    def test_format_turn2_optional_model(self):
+        """Model | None output should render correctly in turn2."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"config": (SimpleModel | None, "Optional config")},
+        )
+
+        result = adapter.format_turn2(sig)
+
+        assert "[[ ## config ## ]]" in result
+        # Should show the model schema with null option
+        assert "[[ ## completed ## ]]" in result
+
+    def test_format_turn2_nested_list(self):
+        """list[list[str]] should render correctly in turn2."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"matrix": (list[list[str]], "2D string matrix")},
+        )
+
+        result = adapter.format_turn2(sig)
+
+        assert "[[ ## matrix ## ]]" in result
+        assert "string[][]" in result
+        # Should NOT be string[][][] (triple brackets)
+        assert "string[][][]" not in result
+
+    def test_format_turn2_dict_type(self):
+        """dict[str, int] should be handled in turn2."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"counts": (dict[str, int], "Word counts")},
+        )
+
+        result = adapter.format_turn2(sig)
+
+        assert "[[ ## counts ## ]]" in result
+        assert "[[ ## completed ## ]]" in result
+
+    def test_format_turn2_json_nested_list(self):
+        """list[list[str]] should render correctly in turn2_json."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"matrix": (list[list[str]], "2D matrix")},
+        )
+
+        result = adapter.format_turn2_json(sig)
+
+        assert '"matrix"' in result
+        assert "```json" in result
+
+    def test_format_turn2_json_dict_type(self):
+        """dict[str, int] should render correctly in turn2_json."""
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"counts": (dict[str, int], "Counts")},
+        )
+
+        result = adapter.format_turn2_json(sig)
+
+        assert '"counts"' in result
+        assert "```json" in result
