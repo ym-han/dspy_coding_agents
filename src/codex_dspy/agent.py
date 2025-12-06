@@ -273,17 +273,17 @@ class CodexAgent(dspy.Module):
 
                 if value is None:
                     parsed_outputs[name] = None
+                elif get_origin(annotation) is list:
+                    # Check for list[PydanticModel] - must check BEFORE direct model check
+                    inner_type = get_args(annotation)[0] if get_args(annotation) else None
+                    if inner_type and hasattr(inner_type, "model_validate") and isinstance(value, list):
+                        parsed_outputs[name] = [inner_type.model_validate(v) for v in value]
+                    else:
+                        parsed_outputs[name] = value
                 elif hasattr(annotation, "model_validate"):
-                    # Pydantic model
+                    # Direct Pydantic model
                     if isinstance(value, dict):
                         parsed_outputs[name] = annotation.model_validate(value)
-                    elif isinstance(value, list):
-                        # Could be list[Model]
-                        inner_type = get_args(annotation)[0] if get_args(annotation) else None
-                        if inner_type and hasattr(inner_type, "model_validate"):
-                            parsed_outputs[name] = [inner_type.model_validate(v) for v in value]
-                        else:
-                            parsed_outputs[name] = value
                     else:
                         parsed_outputs[name] = value
                 else:

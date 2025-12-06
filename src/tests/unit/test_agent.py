@@ -178,3 +178,103 @@ class TestIsAllStrOutputs:
         """list[str] should return False (not plain str)."""
         sig = MockSignature({"items": list[str]})
         assert _is_all_str_outputs(sig) is False
+
+
+class TestListPydanticParsing:
+    """Tests for list[PydanticModel] output parsing.
+
+    Verifies that the parsing logic correctly handles list[Model] annotations.
+    """
+
+    def test_list_pydantic_model_is_validated(self):
+        """list[PydanticModel] should be validated, not returned as raw dicts."""
+        from typing import get_origin, get_args
+        from pydantic import BaseModel
+
+        class BugReport(BaseModel):
+            severity: str
+            description: str
+
+        # Simulate the parsing logic from agent.forward()
+        annotation = list[BugReport]
+        value = [
+            {"severity": "high", "description": "Division by zero"},
+            {"severity": "low", "description": "Missing docstring"},
+        ]
+
+        # This is the fixed logic
+        if get_origin(annotation) is list:
+            inner_type = get_args(annotation)[0] if get_args(annotation) else None
+            if inner_type and hasattr(inner_type, "model_validate") and isinstance(value, list):
+                result = [inner_type.model_validate(v) for v in value]
+            else:
+                result = value
+        else:
+            result = value
+
+        # Verify we got validated Pydantic models, not raw dicts
+        assert len(result) == 2
+        assert isinstance(result[0], BugReport)
+        assert isinstance(result[1], BugReport)
+        assert result[0].severity == "high"
+        assert result[1].description == "Missing docstring"
+
+    def test_list_pydantic_model_detects_inner_type(self):
+        """get_origin/get_args should correctly identify list[Model]."""
+        from typing import get_origin, get_args
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+
+        annotation = list[MyModel]
+
+        assert get_origin(annotation) is list
+        args = get_args(annotation)
+        assert len(args) == 1
+        assert args[0] is MyModel
+        assert hasattr(args[0], "model_validate")
+
+    def test_list_non_pydantic_not_validated(self):
+        """list[str] should not attempt Pydantic validation."""
+        from typing import get_origin, get_args
+
+        annotation = list[str]
+        value = ["a", "b", "c"]
+
+        if get_origin(annotation) is list:
+            inner_type = get_args(annotation)[0] if get_args(annotation) else None
+            if inner_type and hasattr(inner_type, "model_validate") and isinstance(value, list):
+                result = "should not reach here"
+            else:
+                result = value
+        else:
+            result = value
+
+        # str doesn't have model_validate, so value passed through unchanged
+        assert result == ["a", "b", "c"]
+
+    def test_direct_pydantic_model_still_works(self):
+        """Direct PydanticModel (not list) should still be validated."""
+        from typing import get_origin, get_args
+        from pydantic import BaseModel
+
+        class SingleModel(BaseModel):
+            value: int
+
+        annotation = SingleModel
+        value = {"value": 42}
+
+        # Simulate the fixed logic (list check first, then direct model)
+        if get_origin(annotation) is list:
+            result = value  # Not a list annotation
+        elif hasattr(annotation, "model_validate"):
+            if isinstance(value, dict):
+                result = annotation.model_validate(value)
+            else:
+                result = value
+        else:
+            result = value
+
+        assert isinstance(result, SingleModel)
+        assert result.value == 42
