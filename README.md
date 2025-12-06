@@ -1,15 +1,14 @@
 # CodexAgent - DSPy Module for OpenAI Codex SDK
 
-A DSPy module that wraps the OpenAI Codex SDK with a signature-driven interface. Supports **multiple input/output fields** and uses a **two-turn pattern** that keeps agents "in distribution" during task execution.
+A DSPy module that wraps the OpenAI Codex SDK. Uses a **two-turn pattern** that keeps agents "in distribution" during task execution.
 
 ## Features
 
-- **Multi-field signatures** - Any number of input and output fields
 - **Two-turn pattern** - Natural task execution + structured extraction
 - **Stateful threads** - Each agent instance = one conversation thread
-- **Smart schema handling** - BAML-style schemas for Pydantic, markers for strings
-- **Rich outputs** - Get typed results + execution trace + token usage
-- **DSPy-native** - Based on TwoStepAdapter and BAMLAdapter patterns
+- **Typed outputs** - Pydantic models, primitives, lists - all work naturally
+- **Execution trace** - Full visibility into commands, file changes, reasoning
+- **DSPy-native** - Standard signatures, based on TwoStepAdapter patterns
 
 ## Installation
 
@@ -26,22 +25,21 @@ which codex
 
 ## Quick Start
 
-### Simple Single-Field Signature
-
 ```python
 import dspy
 from codex_dspy import CodexAgent
 
-sig = dspy.Signature('message:str -> answer:str')
+# Simple string signature
+sig = dspy.Signature('task: str -> result: str')
 agent = CodexAgent(sig, working_directory=".")
 
-result = agent(message="What files are in this directory?")
-print(result.answer)  # String response
+result = agent(task="What files are in this directory?")
+print(result.result)  # String response
 print(result.trace)   # Execution trace
 print(result.usage)   # Token counts
 ```
 
-### Multi-Field Signature with Pydantic
+### With Pydantic Models
 
 ```python
 from typing import Literal
@@ -51,12 +49,10 @@ class BugReport(BaseModel):
     severity: Literal["low", "medium", "high"] = Field(description="Bug severity")
     location: str = Field(description="File and line number")
     description: str = Field(description="What the bug does")
-    suggested_fix: str = Field(description="How to fix it")
 
-# Multiple inputs AND outputs
 sig = dspy.Signature(
     "code: str, context: str -> bugs: list[BugReport], summary: str",
-    "Analyze code for bugs and provide a summary"
+    "Analyze code for bugs"
 )
 
 agent = CodexAgent(sig, working_directory=".")
@@ -67,7 +63,7 @@ result = agent(
 
 print(result.summary)           # str
 print(result.bugs)              # list[BugReport]
-print(result.bugs[0].severity)  # Typed access!
+print(result.bugs[0].severity)  # Typed access
 ```
 
 ## How It Works: Two-Turn Pattern
@@ -213,7 +209,7 @@ print(result2.summary)
 print(agent.thread_id)
 ```
 
-### Pattern 2: Complex Multi-Field Analysis
+### Pattern 2: Complex Analysis
 
 ```python
 class SecurityAudit(BaseModel):
@@ -373,14 +369,6 @@ Our two-turn pattern:
 2. **Turn 2**: Agent formats findings into structure (quick, focused)
 
 This keeps the agent in-distribution during the actual work.
-
-### Why Multi-Field Support?
-
-Real agentic tasks often need:
-- Multiple inputs (code + context + config)
-- Multiple outputs (analysis + recommendations + confidence)
-
-Single-field signatures force awkward workarounds. Multi-field signatures are declarative and type-safe.
 
 ### Why Stateful Threads?
 
