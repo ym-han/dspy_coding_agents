@@ -96,32 +96,94 @@ The agent reads files, runs commands, reasons naturally - no JSON pressure.
 
 ### Turn 2: Structured Extraction
 
-After the task completes, the agent formats its findings:
+After the task completes, the agent formats its findings using TypeScript syntax (LLMs are heavily trained on TypeScript, making this format intuitive):
 
 ```
-Now provide your findings in the following format:
+Respond with a TypeScript value matching this type:
 
-[[ ## bugs ## ]]
-[
-  {
-    # Bug severity
-    severity: "low" or "medium" or "high",
-    # File and line number
-    location: string,
-    # What the bug does
-    description: string,
-    # How to fix it
-    suggested_fix: string,
-  }
-]
+```typescript
+interface BugReport {
+  /** Bug severity */
+  severity: "low" | "medium" | "high";
+  /** File and line number */
+  location: string;
+  /** What the bug does */
+  description: string;
+}
 
-[[ ## summary ## ]]
-<string>
-
-[[ ## completed ## ]]
+type Response = {
+  /** Bugs found in the code */
+  bugs: BugReport[];
+  /** Overall analysis summary */
+  summary: string;
+};
 ```
 
 This separation keeps the agent in-distribution during the actual work.
+
+### Static Examples
+
+You can provide static examples that show the LLM what good output looks like. These are defined on the signature and survive DSPy optimization (unlike few-shot demos which optimizers can replace):
+
+```python
+class BugReport(BaseModel):
+    severity: Literal["low", "medium", "high"]
+    location: str
+    description: str
+
+class CodeAnalysis(dspy.Signature):
+    """Analyze code for bugs."""
+
+    code: str = dspy.InputField()
+    bugs: list[BugReport] = dspy.OutputField(desc="Bugs found")
+    summary: str = dspy.OutputField(desc="Overall summary")
+
+    # Static examples - shown in Turn 2 prompt
+    class Examples:
+        outputs = [
+            {
+                "bugs": [BugReport(severity="high", location="main.py:42", description="SQL injection")],
+                "summary": "Found 1 critical security issue",
+            },
+            {
+                "bugs": [],
+                "summary": "No issues found",
+            },
+        ]
+```
+
+This renders in Turn 2 as:
+
+```
+Example outputs:
+```typescript
+// Example 1:
+{
+  bugs: [
+    {
+      severity: "high",
+      location: "main.py:42",
+      description: "SQL injection",
+    },
+  ],
+  summary: "Found 1 critical security issue",
+}
+
+// Example 2:
+{
+  bugs: [],
+  summary: "No issues found",
+}
+```
+
+**Two types of examples:**
+
+| Type | Location | Purpose | Survives Optimization? |
+|------|----------|---------|------------------------|
+| **Static** | `signature.Examples.outputs` | Format documentation - "here's what good output looks like" | Yes |
+| **Dynamic** | `predictor.demos` | Few-shot learning for the task itself | No (optimizers replace) |
+
+Static examples only appear in Turn 2 (extraction) since they demonstrate output format, not task execution.
 
 ## API Reference
 
@@ -178,15 +240,21 @@ adapter = CodexAdapter()
 # Format Turn 1 (task)
 turn1 = adapter.format_turn1(signature, inputs)
 
-# Format Turn 2 (extraction with BAML-style markers)
-turn2 = adapter.format_turn2(signature)
+# Format Turn 2 - TypeScript format (preferred)
+turn2 = adapter.format_turn2_typescript(signature)
 
-# Or Turn 2 with JSON schema
-turn2_json = adapter.format_turn2_json(signature)
+# Alternative Turn 2 formats:
+turn2_markers = adapter.format_turn2(signature)      # BAML-style [[ ## field ## ]] markers
+turn2_json = adapter.format_turn2_json(signature)   # JSON schema format
 
 # Parse [[ ## field ## ]] markers from response
 parsed = adapter.parse(signature, completion)
 ```
+
+The TypeScript format (`format_turn2_typescript`) is preferred because:
+- LLMs are heavily trained on TypeScript syntax
+- JSDoc comments provide field descriptions naturally
+- Output is parseable with `json5` (handles trailing commas, unquoted keys)
 
 ## Usage Patterns
 
