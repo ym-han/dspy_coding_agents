@@ -564,6 +564,49 @@ class TestParseOutputValue:
         assert isinstance(result[0], Item)
         assert result[1] is None
 
+    # --- Optional list of models: list[Model] | None ---
+
+    def test_optional_list_of_models_validates_when_present(self):
+        """list[Model] | None should validate list elements when value is not None."""
+        from pydantic import BaseModel
+
+        class BugReport(BaseModel):
+            severity: str
+            description: str
+
+        value = [{"severity": "high", "description": "SQL injection"}]
+        result = _parse_output_value(value, list[BugReport] | None)
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], BugReport)
+        assert result[0].severity == "high"
+
+    def test_optional_list_of_models_none_passes_through(self):
+        """list[Model] | None should return None when value is None."""
+        from pydantic import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        result = _parse_output_value(None, list[Item] | None)
+        assert result is None
+
+    def test_optional_list_of_models_typing_union(self):
+        """Union[list[Model], None] should also validate list elements."""
+        from typing import Union
+        from pydantic import BaseModel
+
+        class Task(BaseModel):
+            title: str
+
+        value = [{"title": "Task 1"}, {"title": "Task 2"}]
+        result = _parse_output_value(value, Union[list[Task], None])
+
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert all(isinstance(r, Task) for r in result)
+
     # --- Existing behavior (regression tests) ---
 
     def test_direct_model_validates(self):

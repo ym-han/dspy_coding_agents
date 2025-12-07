@@ -112,14 +112,19 @@ def _parse_output_value(value: Any, annotation: type) -> Any:
                 return [inner_type.model_validate(v) for v in value]
         return value
 
-    # Handle Optional[Model] (Model | None) - PEP 604 style
+    # Handle Optional[Model] or Optional[list[Model]] (Model | None, list[Model] | None)
     if origin is Union or origin is types.UnionType:
         args = get_args(annotation)
         if type(None) in args:
             # Find the non-None type
-            model_type = next((a for a in args if a is not type(None)), None)
-            if model_type and hasattr(model_type, "model_validate") and isinstance(value, dict):
-                return model_type.model_validate(value)
+            non_none_type = next((a for a in args if a is not type(None)), None)
+            if non_none_type:
+                # If non-None type is a Pydantic model and value is dict, validate
+                if hasattr(non_none_type, "model_validate") and isinstance(value, dict):
+                    return non_none_type.model_validate(value)
+                # If non-None type is list[...], recurse to handle list validation
+                if get_origin(non_none_type) is list and isinstance(value, list):
+                    return _parse_output_value(value, non_none_type)
         return value
 
     # Handle direct Pydantic model
