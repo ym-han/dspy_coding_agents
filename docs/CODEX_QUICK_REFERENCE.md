@@ -76,7 +76,7 @@ resp3 = resumed.run("Write tests")
 from codex import SandboxMode
 
 thread = client.start_thread(ThreadOptions(
-    model="gpt-4",
+    model="gpt-5.1-codex-max",
     sandbox_mode=SandboxMode.WORKSPACE_WRITE,
     working_directory="/path/to/repo"
 ))
@@ -137,7 +137,7 @@ CodexOptions(
 ### Thread
 ```python
 ThreadOptions(
-    model=None,                   # e.g. "gpt-4"
+    model=None,                   # default: "gpt-5.1-codex-max"
     sandbox_mode=None,            # READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS
     working_directory=None,       # Where to run commands
     skip_git_repo_check=False,   # Allow non-git directories
@@ -362,7 +362,7 @@ class AnalysisResult(BaseModel):
 # Setup
 client = Codex(CodexOptions(api_key="sk-..."))
 thread = client.start_thread(ThreadOptions(
-    model="gpt-4",
+    model="gpt-5.1-codex-max",
     sandbox_mode=SandboxMode.WORKSPACE_WRITE,
     working_directory="/path/to/repo",
 ))

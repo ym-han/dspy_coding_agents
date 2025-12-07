@@ -600,8 +600,7 @@ Required:
 
 Optional:
 ├─ model: Optional[str]
-│  └─ Model name (e.g., "gpt-4", "gpt-4-turbo")
-│  └─ Defaults to Codex SDK default
+│  └─ Model name (default: "gpt-5.1-codex-max")
 │
 ├─ sandbox_mode: Optional[SandboxMode]
 │  ├─ READ_ONLY: No file modifications

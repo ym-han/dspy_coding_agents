@@ -1,4 +1,13 @@
-"""Example usage of CodexAgent with string and Pydantic outputs."""
+"""Example usage of CodexAgent with the two-turn pattern.
+
+Demonstrates:
+- Single-field signatures (simple)
+- Multi-field signatures with Pydantic models
+- Multi-turn conversations
+- Inspecting execution trace
+"""
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -8,121 +17,197 @@ from codex import SandboxMode
 from codex_dspy import CodexAgent
 
 
-def example_1_string_output():
-    """Example 1: Simple string output - ask agent about files."""
+def example_1_simple_string():
+    """Example 1: Simple string input/output."""
     print("=" * 60)
-    print("Example 1: String Output")
+    print("Example 1: Simple String Signature")
     print("=" * 60)
 
-    # Create signature with string input and output
     sig = dspy.Signature("message:str -> answer:str")
 
-    # Create agent (starts new thread)
     agent = CodexAgent(
         sig,
         working_directory=".",
-        sandbox_mode=SandboxMode.READ_ONLY,  # Safe: no file modifications
-        codex_path_override="/opt/homebrew/bin/codex",
+        sandbox_mode=SandboxMode.READ_ONLY,
     )
 
-    # Call agent
     result = agent(message="What files are in this directory? List the top 5.")
 
-    # Access results
     print(f"\nAnswer: {result.answer}")
     print(f"\nThread ID: {agent.thread_id}")
-    print(f"\nUsage: {result.usage}")
-    print(f"\nTrace items ({len(result.trace)}):")
-    for item in result.trace:
-        print(f"  - {item.type}: {item.id}")
-
-    # Multi-turn: continue same thread
-    print("\n" + "-" * 60)
-    print("Continuing conversation...")
-    print("-" * 60)
-
-    result2 = agent(message="What about Python files specifically?")
-    print(f"\nAnswer: {result2.answer}")
-    print(f"Thread ID (same): {agent.thread_id}")
+    print(f"Usage: {result.usage}")
+    print(f"Trace items: {len(result.trace)}")
 
 
-def example_2_pydantic_output():
-    """Example 2: Structured Pydantic output - analyze repo."""
+def example_2_multi_field_pydantic():
+    """Example 2: Multiple fields with Pydantic models."""
     print("\n" + "=" * 60)
-    print("Example 2: Pydantic Typed Output")
+    print("Example 2: Multi-Field Signature with Pydantic")
     print("=" * 60)
 
-    # Define Pydantic model for structured output
-    class RepoAnalysis(BaseModel):
-        """Analysis of a repository."""
+    class BugReport(BaseModel):
+        severity: Literal["low", "medium", "high"] = Field(description="Bug severity")
+        location: str = Field(description="File and line number")
+        description: str = Field(description="What the bug does")
 
-        total_files: int = Field(description="Total number of files")
-        python_files: int = Field(description="Number of Python files")
-        key_files: list[str] = Field(description="Most important files (3-5)")
-        summary: str = Field(description="One sentence summary")
+    # Multiple inputs AND outputs
+    sig = dspy.Signature(
+        "code: str, context: str -> bugs: list[BugReport], summary: str",
+        "Analyze code for potential bugs"
+    )
 
-    # Create signature with Pydantic output type
-    sig = dspy.Signature("message:str -> analysis:RepoAnalysis")
-
-    # Create agent
     agent = CodexAgent(
         sig,
         working_directory=".",
         sandbox_mode=SandboxMode.READ_ONLY,
-        codex_path_override="/opt/homebrew/bin/codex",
     )
 
-    # Call agent with structured output request
-    result = agent(message="Analyze the structure of this repository")
+    result = agent(
+        code="""
+def divide(a, b):
+    return a / b
 
-    # Access typed results
-    print(f"\nAnalysis (typed):")
-    print(f"  Total files: {result.analysis.total_files}")
-    print(f"  Python files: {result.analysis.python_files}")
-    print(f"  Key files: {result.analysis.key_files}")
-    print(f"  Summary: {result.analysis.summary}")
+def get_item(items, index):
+    return items[index]
+""",
+        context="These are utility functions in a production calculator module"
+    )
 
-    print(f"\nThread ID: {agent.thread_id}")
-    print(f"Usage: {result.usage}")
+    print(f"\nSummary: {result.summary}")
+    print(f"\nBugs found ({len(result.bugs)}):")
+    for bug in result.bugs:
+        print(f"  [{bug.severity}] {bug.location}")
+        print(f"    {bug.description}")
 
 
-def example_3_with_description():
-    """Example 3: Using output field description."""
+def example_3_multi_turn():
+    """Example 3: Multi-turn conversation with context."""
     print("\n" + "=" * 60)
-    print("Example 3: Output Field with Description")
+    print("Example 3: Multi-Turn Conversation")
     print("=" * 60)
 
-    # Create signature with description on output field
-    class AnalysisSignature(dspy.Signature):
-        """Analyze repository architecture."""
+    sig = dspy.Signature("request: str -> response: str")
 
-        message: str = dspy.InputField()
-        analysis: str = dspy.OutputField(
-            desc="A detailed analysis in markdown format with sections for: "
-            "1) Architecture overview, 2) Key components, 3) Dependencies"
-        )
-
-    # Create agent
     agent = CodexAgent(
-        AnalysisSignature,
+        sig,
         working_directory=".",
         sandbox_mode=SandboxMode.READ_ONLY,
-        codex_path_override="/opt/homebrew/bin/codex",
     )
 
-    # The description will be appended to the message automatically
-    result = agent(message="Analyze this codebase")
+    # Turn 1
+    result1 = agent(request="What Python files are in this project?")
+    print(f"\nTurn 1 Response: {result1.response[:200]}...")
 
-    print(f"\nAnalysis:\n{result.analysis}")
-    print(f"\nThread ID: {agent.thread_id}")
+    # Turn 2 - has context from Turn 1
+    result2 = agent(request="Which one has the most lines of code?")
+    print(f"\nTurn 2 Response: {result2.response[:200]}...")
+
+    # Same thread throughout
+    print(f"\nThread ID (same for both): {agent.thread_id}")
+
+
+def example_4_complex_analysis():
+    """Example 4: Complex multi-output analysis."""
+    print("\n" + "=" * 60)
+    print("Example 4: Complex Analysis with Multiple Outputs")
+    print("=" * 60)
+
+    class FileInfo(BaseModel):
+        path: str = Field(description="File path")
+        purpose: str = Field(description="What this file does")
+        key_functions: list[str] = Field(description="Important functions/classes")
+
+    class RepoAnalysis(BaseModel):
+        architecture: str = Field(description="High-level architecture description")
+        main_files: list[FileInfo] = Field(description="Key files in the project")
+        tech_stack: list[str] = Field(description="Technologies used")
+
+    sig = dspy.Signature(
+        "directory: str, focus: str -> analysis: RepoAnalysis, recommendations: str",
+        "Analyze repository structure and provide recommendations"
+    )
+
+    agent = CodexAgent(
+        sig,
+        working_directory=".",
+        sandbox_mode=SandboxMode.READ_ONLY,
+    )
+
+    result = agent(
+        directory="src/",
+        focus="Understand the DSPy integration architecture"
+    )
+
+    print(f"\nArchitecture: {result.analysis.architecture}")
+    print(f"\nTech Stack: {result.analysis.tech_stack}")
+    print(f"\nKey Files ({len(result.analysis.main_files)}):")
+    for f in result.analysis.main_files[:3]:
+        print(f"  {f.path}: {f.purpose}")
+    print(f"\nRecommendations: {result.recommendations[:300]}...")
+
+
+def example_5_trace_inspection():
+    """Example 5: Inspecting the execution trace."""
+    print("\n" + "=" * 60)
+    print("Example 5: Execution Trace Inspection")
+    print("=" * 60)
+
+    from codex import CommandExecutionItem, AgentMessageItem
+
+    sig = dspy.Signature("task: str -> result: str")
+
+    agent = CodexAgent(
+        sig,
+        working_directory=".",
+        sandbox_mode=SandboxMode.READ_ONLY,
+    )
+
+    result = agent(task="Count the number of Python files in this project")
+
+    print(f"\nResult: {result.result}")
+    print(f"\nExecution Trace ({len(result.trace)} items):")
+
+    for item in result.trace:
+        if isinstance(item, CommandExecutionItem):
+            print(f"  [CMD] {item.command}")
+            print(f"        Exit: {item.exit_code}")
+        elif isinstance(item, AgentMessageItem):
+            preview = item.text[:100] + "..." if len(item.text) > 100 else item.text
+            print(f"  [MSG] {preview}")
+        else:
+            print(f"  [{item.type}] {item.id}")
 
 
 if __name__ == "__main__":
-    # Run all examples
-    example_1_string_output()
-    example_2_pydantic_output()
-    example_3_with_description()
+    import sys
 
-    print("\n" + "=" * 60)
-    print("All examples completed!")
-    print("=" * 60)
+    examples = {
+        "1": ("Simple string", example_1_simple_string),
+        "2": ("Multi-field Pydantic", example_2_multi_field_pydantic),
+        "3": ("Multi-turn conversation", example_3_multi_turn),
+        "4": ("Complex analysis", example_4_complex_analysis),
+        "5": ("Trace inspection", example_5_trace_inspection),
+    }
+
+    if len(sys.argv) > 1:
+        choice = sys.argv[1]
+        if choice in examples:
+            examples[choice][1]()
+        else:
+            print(f"Unknown example: {choice}")
+            print(f"Available: {list(examples.keys())}")
+    else:
+        print("CodexAgent Examples")
+        print("=" * 60)
+        print("\nRun a specific example:")
+        for key, (name, _) in examples.items():
+            print(f"  python examples/basic_usage.py {key}  # {name}")
+        print("\nOr run all:")
+        print("  python examples/basic_usage.py all")
+
+        if len(sys.argv) > 1 and sys.argv[1] == "all":
+            for _, func in examples.values():
+                func()
+            print("\n" + "=" * 60)
+            print("All examples completed!")
+            print("=" * 60)

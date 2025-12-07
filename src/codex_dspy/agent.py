@@ -3,8 +3,15 @@
 This module provides a signature-driven interface to the Codex agent SDK.
 Each CodexAgent instance maintains a stateful thread that accumulates context
 across multiple forward() calls.
+
+Uses a two-turn pattern:
+- Turn 1: Natural task execution (agent does work)
+- Turn 2: Structured output extraction (agent formats findings)
 """
 
+import json
+import re
+import types
 from typing import Any, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -14,28 +21,187 @@ from dspy.primitives.prediction import Prediction
 from dspy.signatures.signature import Signature, ensure_signature
 
 from codex import Codex, CodexOptions, SandboxMode, ThreadOptions, TurnOptions
+from codex_dspy.adapter import CodexAdapter
 
 
-def _is_str_type(annotation: Any) -> bool:
-    """Check if annotation is str or Optional[str].
+def _combine_usage(usage1, usage2):
+    """Combine token usage from two turns.
 
     Args:
-        annotation: Type annotation to check
+        usage1: Usage from first turn (may be None)
+        usage2: Usage from second turn (may be None)
 
     Returns:
-        True if annotation is str, Optional[str], or Union[str, None]
+        Combined usage with summed token counts, or whichever is not None
     """
-    if annotation == str:
-        return True
+    if usage1 is None:
+        return usage2
+    if usage2 is None:
+        return usage1
+
+    # Both exist - sum the token counts
+    # Create a new usage-like object with combined counts
+    from codex import Usage
+    return Usage(
+        input_tokens=(usage1.input_tokens or 0) + (usage2.input_tokens or 0),
+        output_tokens=(usage1.output_tokens or 0) + (usage2.output_tokens or 0),
+        cached_input_tokens=(usage1.cached_input_tokens or 0) + (usage2.cached_input_tokens or 0),
+    )
+
+
+def _strip_json_fences(text: str) -> str:
+    """Strip markdown JSON fences from response if present.
+
+    Handles:
+        ```json\n{...}\n```
+        ```\n{...}\n```
+        {..} (no fences - returned as-is)
+    """
+    text = text.strip()
+
+    # Pattern for ```json ... ``` or ``` ... ```
+    fence_pattern = re.compile(r'^```(?:json)?\s*\n?(.*?)\n?```$', re.DOTALL)
+    match = fence_pattern.match(text)
+    if match:
+        return match.group(1).strip()
+
+    return text
+
+
+def _parse_output_value(value: Any, annotation: type) -> Any:
+    """Parse a single output value according to its type annotation.
+
+    Handles:
+    - None values (pass through)
+    - list[PydanticModel] - validate each element
+    - list[Model | None] - validate dicts, keep Nones
+    - Model | None - validate if dict, pass through if None
+    - Direct PydanticModel - validate dict
+    - Primitives and other types - pass through
+
+    Args:
+        value: The raw value from JSON
+        annotation: The type annotation for this field
+
+    Returns:
+        The parsed/validated value
+    """
+    if value is None:
+        return None
 
     origin = get_origin(annotation)
-    if origin is Union:
-        args = get_args(annotation)
-        # Check for Optional[str] which is Union[str, None]
-        if len(args) == 2 and str in args and type(None) in args:
-            return True
 
-    return False
+    # Handle list types
+    if origin is list:
+        inner_type = get_args(annotation)[0] if get_args(annotation) else None
+        if inner_type and isinstance(value, list):
+            # Check if inner type is Optional[Model] (Model | None)
+            inner_origin = get_origin(inner_type)
+            if inner_origin is Union or inner_origin is types.UnionType:
+                inner_args = get_args(inner_type)
+                # Find the non-None type
+                model_type = next((a for a in inner_args if a is not type(None)), None)
+                if model_type and hasattr(model_type, "model_validate"):
+                    # list[Model | None] - validate dicts, keep Nones
+                    return [
+                        model_type.model_validate(v) if isinstance(v, dict) else v
+                        for v in value
+                    ]
+            # Check if inner type is a direct Pydantic model
+            elif hasattr(inner_type, "model_validate"):
+                return [inner_type.model_validate(v) for v in value]
+        return value
+
+    # Handle Optional[Model] or Optional[list[Model]] (Model | None, list[Model] | None)
+    if origin is Union or origin is types.UnionType:
+        args = get_args(annotation)
+        if type(None) in args:
+            # Find the non-None type
+            non_none_type = next((a for a in args if a is not type(None)), None)
+            if non_none_type:
+                # If non-None type is a Pydantic model and value is dict, validate
+                if hasattr(non_none_type, "model_validate") and isinstance(value, dict):
+                    return non_none_type.model_validate(value)
+                # If non-None type is list[...], recurse to handle list validation
+                if get_origin(non_none_type) is list and isinstance(value, list):
+                    return _parse_output_value(value, non_none_type)
+        return value
+
+    # Handle direct Pydantic model
+    if hasattr(annotation, "model_validate"):
+        if isinstance(value, dict):
+            return annotation.model_validate(value)
+        return value
+
+    # Primitives and other types - pass through
+    return value
+
+
+def _is_all_str_outputs(signature: Signature) -> bool:
+    """Check if all output fields are str or Optional[str]."""
+    for field in signature.output_fields.values():
+        annotation = field.annotation
+        if annotation == str:
+            continue
+        origin = get_origin(annotation)
+        # Handle both typing.Union and types.UnionType (PEP 604: str | None)
+        if origin is Union or origin is types.UnionType:
+            args = get_args(annotation)
+            if len(args) == 2 and str in args and type(None) in args:
+                continue
+        return False
+    return True
+
+
+def _build_output_schema(signature: Signature) -> dict[str, Any]:
+    """Build a combined JSON schema for all output fields.
+
+    Hoists $defs from individual field schemas to the root level so that
+    $ref pointers resolve correctly.
+    """
+    properties = {}
+    required = []
+    all_defs: dict[str, Any] = {}
+
+    for name, field in signature.output_fields.items():
+        annotation = field.annotation
+        if annotation == str:
+            properties[name] = {"type": "string"}
+        elif hasattr(annotation, "model_json_schema"):
+            # Pydantic model
+            field_schema = annotation.model_json_schema()
+            # Hoist $defs to root
+            if "$defs" in field_schema:
+                all_defs.update(field_schema.pop("$defs"))
+            properties[name] = field_schema
+        else:
+            # Fallback - try to get schema via pydantic TypeAdapter
+            from pydantic import TypeAdapter
+            field_schema = TypeAdapter(annotation).json_schema()
+            # Hoist $defs to root
+            if "$defs" in field_schema:
+                all_defs.update(field_schema.pop("$defs"))
+            properties[name] = field_schema
+
+        # Check if required (not Optional)
+        # Handle both typing.Union and types.UnionType (PEP 604: str | None)
+        origin = get_origin(annotation)
+        is_optional = (origin is Union or origin is types.UnionType) and type(None) in get_args(annotation)
+        if not is_optional:
+            required.append(name)
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+    # Add hoisted $defs at root level
+    if all_defs:
+        schema["$defs"] = all_defs
+
+    return schema
 
 
 class CodexAgent(dspy.Module):
@@ -44,32 +210,33 @@ class CodexAgent(dspy.Module):
     Creates a stateful agent where each instance maintains one conversation thread.
     Multiple forward() calls on the same instance continue the same conversation.
 
+    Supports multiple input and output fields. Uses a two-turn pattern:
+    - Turn 1: Agent receives task naturally and does work
+    - Turn 2: Agent formats findings into structured output
+
     Args:
-        signature: DSPy signature (must have exactly 1 input and 1 output field)
+        signature: DSPy signature with any number of input/output fields
         working_directory: Directory where Codex agent will execute commands
-        model: Model to use (e.g., "gpt-4", "gpt-4-turbo"). Defaults to Codex default.
+        model: Model to use. Defaults to "gpt-5.1-codex-max".
         sandbox_mode: Execution sandbox level (READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS)
         skip_git_repo_check: Allow non-git directories as working_directory
         api_key: OpenAI API key (falls back to CODEX_API_KEY env var)
         base_url: API base URL (falls back to OPENAI_BASE_URL env var)
         codex_path_override: Override path to codex binary (for testing)
 
-    Example:
-        >>> sig = dspy.Signature('message:str -> answer:str')
-        >>> agent = CodexAgent(sig, working_directory=".")
-        >>> result = agent(message="What files are in this directory?")
-        >>> print(result.answer)  # str response
-        >>> print(result.trace)   # list of items (commands, files, etc.)
-        >>> print(result.usage)   # token counts
-
-    Example with Pydantic output:
+    Example with multiple fields:
         >>> class BugReport(BaseModel):
         ...     severity: str
         ...     description: str
-        >>> sig = dspy.Signature('message:str -> report:BugReport')
+        >>> sig = dspy.Signature(
+        ...     "code: str, context: str -> bugs: list[BugReport], summary: str",
+        ...     "Analyze code for bugs"
+        ... )
         >>> agent = CodexAgent(sig, working_directory=".")
-        >>> result = agent(message="Analyze the bug")
-        >>> print(result.report.severity)  # typed access
+        >>> result = agent(code="def foo(): ...", context="Production code")
+        >>> print(result.bugs)    # list[BugReport]
+        >>> print(result.summary) # str
+        >>> print(result.trace)   # execution trace
     """
 
     def __init__(
@@ -88,26 +255,21 @@ class CodexAgent(dspy.Module):
         # Ensure signature is valid
         self.signature = ensure_signature(signature)
 
-        # Validate: exactly 1 input field, 1 output field
-        if len(self.signature.input_fields) != 1:
-            input_fields = list(self.signature.input_fields.keys())
+        # Validate: at least 1 input and 1 output field
+        if len(self.signature.input_fields) < 1:
             raise ValueError(
-                f"CodexAgent requires exactly 1 input field, got {len(input_fields)}: {input_fields}\n"
-                f"Example: dspy.Signature('message:str -> answer:str')"
+                "CodexAgent requires at least 1 input field.\n"
+                "Example: dspy.Signature('message:str -> answer:str')"
             )
 
-        if len(self.signature.output_fields) != 1:
-            output_fields = list(self.signature.output_fields.keys())
+        if len(self.signature.output_fields) < 1:
             raise ValueError(
-                f"CodexAgent requires exactly 1 output field, got {len(output_fields)}: {output_fields}\n"
-                f"Example: dspy.Signature('message:str -> answer:str')"
+                "CodexAgent requires at least 1 output field.\n"
+                "Example: dspy.Signature('message:str -> answer:str')"
             )
 
-        # Extract field names and types
-        self.input_field = list(self.signature.input_fields.keys())[0]
-        self.output_field = list(self.signature.output_fields.keys())[0]
-        self.output_field_info = self.signature.output_fields[self.output_field]
-        self.output_type = self.output_field_info.annotation
+        # Create adapter for formatting
+        self.adapter = CodexAdapter()
 
         # Create Codex client
         self.client = Codex(
@@ -129,64 +291,80 @@ class CodexAgent(dspy.Module):
         )
 
     def forward(self, **kwargs) -> Prediction:
-        """Execute agent with input message.
+        """Execute agent with input fields.
 
         Args:
-            **kwargs: Must contain the input field specified in signature
+            **kwargs: Must contain all input fields specified in signature
 
         Returns:
             Prediction with:
-                - Typed output field (name from signature)
+                - All output fields (typed according to signature)
                 - trace: list[ThreadItem] - chronological items (commands, files, etc.)
                 - usage: Usage - token counts (input_tokens, cached_input_tokens, output_tokens)
 
         Raises:
-            ValueError: If Pydantic parsing fails for typed output
+            ValueError: If parsing fails for typed outputs
         """
-        # 1. Extract input message
-        message = kwargs[self.input_field]
+        # Validate all input fields are provided
+        for field_name in self.signature.input_fields:
+            if field_name not in kwargs:
+                raise ValueError(f"Missing required input field: {field_name}")
 
-        # 2. Append output field description if present (skip DSPy's default ${field_name} placeholder)
-        output_desc = (self.output_field_info.json_schema_extra or {}).get("desc")
-        # Skip if desc is just DSPy's default placeholder (e.g., "${answer}" for field named "answer")
-        if output_desc and output_desc != f"${{{self.output_field}}}":
-            message = f"{message}\n\nPlease produce the following output: {output_desc}"
+        # Turn 1: Natural task execution
+        turn1_prompt = self.adapter.format_turn1(self.signature, kwargs)
+        task_result = self.thread.run(turn1_prompt)
 
-        # 3. Build TurnOptions if output type is not str
-        turn_options = None
-        if not _is_str_type(self.output_type):
-            # Get Pydantic JSON schema and ensure additionalProperties is false
-            schema = self.output_type.model_json_schema()
-            if "additionalProperties" not in schema:
-                schema["additionalProperties"] = False
-            turn_options = TurnOptions(output_schema=schema)
+        # Check if we need structured output extraction
+        if _is_all_str_outputs(self.signature):
+            # All outputs are strings - parse from natural response
+            # For single string output, just return the response
+            if len(self.signature.output_fields) == 1:
+                output_name = list(self.signature.output_fields.keys())[0]
+                return Prediction(
+                    **{output_name: task_result.final_response},
+                    trace=task_result.items,
+                    usage=task_result.usage,
+                )
+            else:
+                # Multiple string outputs - need extraction turn
+                turn2_prompt = self.adapter.format_turn2(self.signature)
+                extract_result = self.thread.run(turn2_prompt)
+                parsed = self.adapter.parse(self.signature, extract_result.final_response)
 
-        # 4. Call Codex SDK
-        result = self.thread.run(message, turn_options)
+                return Prediction(
+                    **parsed,
+                    trace=task_result.items + extract_result.items,
+                    usage=_combine_usage(task_result.usage, extract_result.usage),
+                )
+        else:
+            # Need structured output - Turn 2 with JSON schema
+            turn2_prompt = self.adapter.format_turn2_json(self.signature)
+            output_schema = _build_output_schema(self.signature)
+            turn_options = TurnOptions(output_schema=output_schema)
 
-        # 5. Parse response
-        parsed_output = result.final_response
+            extract_result = self.thread.run(turn2_prompt, turn_options)
 
-        if not _is_str_type(self.output_type):
-            # Parse as Pydantic model
+            # Parse JSON response (strip fences if present)
             try:
-                parsed_output = self.output_type.model_validate_json(result.final_response)
-            except Exception as e:
-                # Provide helpful error with response preview
-                response_preview = result.final_response[:500]
-                if len(result.final_response) > 500:
-                    response_preview += "..."
+                json_str = _strip_json_fences(extract_result.final_response)
+                raw_output = json.loads(json_str)
+            except json.JSONDecodeError as e:
                 raise ValueError(
-                    f"Failed to parse Codex response as {self.output_type.__name__}: {e}\n"
-                    f"Response: {response_preview}"
+                    f"Failed to parse JSON response: {e}\n"
+                    f"Response: {extract_result.final_response[:500]}"
                 ) from e
 
-        # 6. Return Prediction with typed output + trace + usage
-        return Prediction(
-            **{self.output_field: parsed_output},
-            trace=result.items,
-            usage=result.usage,
-        )
+            # Convert to typed outputs using centralized parsing logic
+            parsed_outputs = {}
+            for name, field in self.signature.output_fields.items():
+                value = raw_output.get(name)
+                parsed_outputs[name] = _parse_output_value(value, field.annotation)
+
+            return Prediction(
+                **parsed_outputs,
+                trace=task_result.items + extract_result.items,
+                usage=_combine_usage(task_result.usage, extract_result.usage),
+            )
 
     @property
     def thread_id(self) -> Optional[str]:

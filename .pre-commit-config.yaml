@@ -1,0 +1,25 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-test-colocation
+        name: Check test co-location
+        entry: python scripts/check_test_colocation.py
+        language: python
+        pass_filenames: false
+        always_run: true
+        description: Ensures unit tests are co-located in src/tests/unit/
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
