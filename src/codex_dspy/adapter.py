@@ -17,6 +17,14 @@ from pydantic.fields import FieldInfo
 
 # --- TypeScript Conversion ---
 
+def _is_optional_type(annotation: Any) -> bool:
+    """Check if a type annotation is optional (Union with None)."""
+    origin = get_origin(annotation)
+    if origin is Union or origin is types.UnionType:
+        return type(None) in get_args(annotation)
+    return False
+
+
 def _ts_type(annotation: Any, seen: set[type] | None = None) -> str:
     """Convert Python type annotation to TypeScript type string."""
     seen = seen or set()
@@ -507,7 +515,8 @@ class CodexAdapter:
             if field.description:
                 parts.append(f"  /** {field.description} */")
             ts_type = _ts_type(field.annotation)
-            parts.append(f"  {name}: {ts_type};")
+            optional_marker = "?" if _is_optional_type(field.annotation) else ""
+            parts.append(f"  {name}{optional_marker}: {ts_type};")
         parts.append("};")
         parts.append("```")
 

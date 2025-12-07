@@ -780,6 +780,44 @@ class TestFormatTurn2Typescript:
         assert '"first"' in result
         assert '"second"' in result
 
+    def test_optional_output_fields_marked_with_question_mark(self):
+        """Optional output fields should have ? in the Response type."""
+        adapter = CodexAdapter()
+
+        class SigWithOptional:
+            output_fields = {
+                "required_field": MockFieldInfo(str, "Always present"),
+                "optional_field": MockFieldInfo(str | None, "May be null"),
+            }
+
+        result = adapter.format_turn2_typescript(SigWithOptional)
+
+        assert "required_field: string;" in result
+        assert "optional_field?: string | null;" in result
+
+
+class TestIsOptionalType:
+    """Tests for _is_optional_type helper."""
+
+    def test_plain_type_not_optional(self):
+        from codex_dspy.adapter import _is_optional_type
+        assert _is_optional_type(str) is False
+        assert _is_optional_type(int) is False
+
+    def test_union_with_none_is_optional(self):
+        from codex_dspy.adapter import _is_optional_type
+        assert _is_optional_type(str | None) is True
+        assert _is_optional_type(int | None) is True
+
+    def test_typing_optional_is_optional(self):
+        from typing import Optional
+        from codex_dspy.adapter import _is_optional_type
+        assert _is_optional_type(Optional[str]) is True
+
+    def test_union_without_none_not_optional(self):
+        from codex_dspy.adapter import _is_optional_type
+        assert _is_optional_type(str | int) is False
+
 
 class MockFieldInfo:
     """Mock for testing."""
