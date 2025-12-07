@@ -15,7 +15,189 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 
-# --- Schema Rendering (from BAML) ---
+# --- TypeScript Conversion ---
+
+def _ts_type(annotation: Any, seen: set[type] | None = None) -> str:
+    """Convert Python type annotation to TypeScript type string."""
+    seen = seen or set()
+
+    # Primitives
+    if annotation is str:
+        return "string"
+    if annotation is int or annotation is float:
+        return "number"
+    if annotation is bool:
+        return "boolean"
+    if annotation is type(None):
+        return "null"
+
+    # Pydantic model - just use the name (interface defined separately)
+    if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+        return annotation.__name__
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    # Optional / Union
+    if origin is Union or origin is types.UnionType:
+        parts = [_ts_type(a, seen) for a in args]
+        return " | ".join(parts)
+
+    # Literal
+    if origin is Literal:
+        return " | ".join(f'"{a}"' if isinstance(a, str) else str(a).lower() for a in args)
+
+    # list / Array
+    if origin is list:
+        inner = _ts_type(args[0], seen) if args else "any"
+        # Wrap union types in parens for array
+        if " | " in inner:
+            return f"Array<{inner}>"
+        return f"{inner}[]"
+
+    # dict / Record
+    if origin is dict:
+        key_type = _ts_type(args[0], seen) if args else "string"
+        val_type = _ts_type(args[1], seen) if len(args) > 1 else "any"
+        return f"Record<{key_type}, {val_type}>"
+
+    # Fallback
+    if hasattr(annotation, "__name__"):
+        return annotation.__name__
+    return "any"
+
+
+def _collect_models(annotation: Any, collected: set[type] | None = None) -> set[type]:
+    """Recursively collect all Pydantic models referenced in a type annotation."""
+    if collected is None:
+        collected = set()
+
+    if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+        if annotation not in collected:
+            collected.add(annotation)
+            # Recurse into model fields
+            for field in annotation.model_fields.values():
+                _collect_models(field.annotation, collected)
+        return collected
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if args:
+        for arg in args:
+            _collect_models(arg, collected)
+
+    return collected
+
+
+def pydantic_to_typescript(models: list[type[BaseModel]] | type[BaseModel]) -> str:
+    """Convert Pydantic models to TypeScript interfaces.
+
+    Args:
+        models: A single model or list of models to convert.
+                Recursively includes all referenced models.
+
+    Returns:
+        TypeScript interface definitions as a string.
+    """
+    if not isinstance(models, list):
+        models = [models]
+
+    # Collect all referenced models
+    all_models: set[type] = set()
+    for model in models:
+        _collect_models(model, all_models)
+
+    # Sort for deterministic output (dependencies first would be ideal, but alphabetical is fine)
+    sorted_models = sorted(all_models, key=lambda m: m.__name__)
+
+    interfaces = []
+    for model in sorted_models:
+        lines = [f"interface {model.__name__} {{"]
+
+        for name, field in model.model_fields.items():
+            # JSDoc comment for description
+            if field.description:
+                lines.append(f"  /** {field.description} */")
+
+            # Check if optional (not required by Pydantic)
+            is_optional = not field.is_required()
+
+            ts_type = _ts_type(field.annotation)
+            # Remove null from type if we're marking as optional with ?
+            if is_optional and " | null" in ts_type:
+                ts_type = ts_type.replace(" | null", "")
+
+            optional_marker = "?" if is_optional else ""
+            lines.append(f"  {name}{optional_marker}: {ts_type};")
+
+        lines.append("}")
+        interfaces.append("\n".join(lines))
+
+    return "\n\n".join(interfaces)
+
+
+def value_to_typescript(value: Any, indent: int = 0) -> str:
+    """Convert a Python value to TypeScript literal syntax.
+
+    Handles Pydantic models, dicts, lists, and primitives.
+    """
+    prefix = "  " * indent
+
+    if value is None:
+        return "null"
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, (int, float)):
+        return str(value)
+
+    if isinstance(value, str):
+        # Escape quotes and use double quotes
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        return f'"{escaped}"'
+
+    if isinstance(value, BaseModel):
+        return value_to_typescript(value.model_dump(), indent)
+
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        lines = ["{"]
+        items = list(value.items())
+        for i, (k, v) in enumerate(items):
+            comma = "," if i < len(items) - 1 else ","  # trailing comma
+            val_str = value_to_typescript(v, indent + 1)
+            # Handle multi-line values
+            if "\n" in val_str:
+                lines.append(f"{prefix}  {k}: {val_str}{comma}")
+            else:
+                lines.append(f"{prefix}  {k}: {val_str}{comma}")
+        lines.append(f"{prefix}}}")
+        return "\n".join(lines)
+
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        # Check if simple list (all primitives on one line)
+        if all(isinstance(v, (str, int, float, bool, type(None))) for v in value):
+            items = [value_to_typescript(v, 0) for v in value]
+            return f"[{', '.join(items)}]"
+        # Complex list - multi-line
+        lines = ["["]
+        for i, v in enumerate(value):
+            comma = "," if i < len(value) - 1 else ","
+            val_str = value_to_typescript(v, indent + 1)
+            lines.append(f"{prefix}  {val_str}{comma}")
+        lines.append(f"{prefix}]")
+        return "\n".join(lines)
+
+    # Fallback
+    return str(value)
+
+
+# --- Schema Rendering (from BAML) - kept for backwards compat ---
 
 def _render_type_str(
     annotation: Any,
@@ -284,6 +466,64 @@ class CodexAdapter:
             parts.append("")
 
         parts.append("[[ ## completed ## ]]")
+        return "\n".join(parts)
+
+    def format_turn2_typescript(self, signature) -> str:
+        """Format Turn 2 using TypeScript interfaces.
+
+        This is the preferred format:
+        - Uses real TypeScript syntax (LLMs know it well)
+        - JSDoc comments for field descriptions
+        - Optional fields marked with ?
+        - Includes static examples from signature if defined
+
+        Expected output from LLM: TypeScript object literal (parseable with json5)
+        """
+        parts = []
+        parts.append("Respond with a TypeScript value matching this type:")
+        parts.append("")
+
+        # Collect all Pydantic models from output fields
+        models_to_render = []
+        for field in signature.output_fields.values():
+            if inspect.isclass(field.annotation) and issubclass(field.annotation, BaseModel):
+                models_to_render.append(field.annotation)
+            else:
+                # Check for models inside generics (list[Model], etc.)
+                _collect_models(field.annotation, set())  # warm up
+                for model in _collect_models(field.annotation):
+                    if model not in models_to_render:
+                        models_to_render.append(model)
+
+        # Render TypeScript interfaces
+        if models_to_render:
+            parts.append(pydantic_to_typescript(models_to_render))
+            parts.append("")
+
+        # Build the Response type from output fields
+        parts.append("type Response = {")
+        for name, field in signature.output_fields.items():
+            if field.description:
+                parts.append(f"  /** {field.description} */")
+            ts_type = _ts_type(field.annotation)
+            parts.append(f"  {name}: {ts_type};")
+        parts.append("};")
+
+        # Add static examples if defined on signature
+        examples = getattr(signature, 'Examples', None)
+        if examples:
+            output_examples = getattr(examples, 'outputs', None)
+            if output_examples:
+                parts.append("")
+                if len(output_examples) == 1:
+                    parts.append("Example output:")
+                    parts.append(value_to_typescript(output_examples[0]))
+                else:
+                    parts.append("Example outputs:")
+                    for i, ex in enumerate(output_examples):
+                        parts.append(f"\n// Example {i + 1}:")
+                        parts.append(value_to_typescript(ex))
+
         return "\n".join(parts)
 
     def format_turn2_json(self, signature) -> str:

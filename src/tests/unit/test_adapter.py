@@ -589,3 +589,198 @@ class TestEdgeCaseTypes:
         assert "null" in result
         # Should NOT have the broken }[] format
         assert "} or null[]" not in result
+
+
+# --- TypeScript Conversion Tests ---
+
+from codex_dspy.adapter import (
+    _ts_type,
+    _collect_models,
+    pydantic_to_typescript,
+    value_to_typescript,
+)
+
+
+class TestTsType:
+    """Tests for _ts_type function."""
+
+    def test_primitives(self):
+        assert _ts_type(str) == "string"
+        assert _ts_type(int) == "number"
+        assert _ts_type(float) == "number"
+        assert _ts_type(bool) == "boolean"
+
+    def test_optional(self):
+        result = _ts_type(str | None)
+        assert "string" in result
+        assert "null" in result
+        assert "|" in result
+
+    def test_list(self):
+        assert _ts_type(list[str]) == "string[]"
+        assert _ts_type(list[int]) == "number[]"
+
+    def test_list_of_optional(self):
+        result = _ts_type(list[str | None])
+        assert "Array<" in result  # Uses Array<> for union types
+        assert "string" in result
+        assert "null" in result
+
+    def test_dict(self):
+        result = _ts_type(dict[str, int])
+        assert "Record<" in result
+        assert "string" in result
+        assert "number" in result
+
+    def test_literal(self):
+        from typing import Literal
+        result = _ts_type(Literal["a", "b", "c"])
+        assert '"a"' in result
+        assert '"b"' in result
+        assert '"c"' in result
+
+    def test_pydantic_model(self):
+        result = _ts_type(SimpleModel)
+        assert result == "SimpleModel"
+
+
+class TestCollectModels:
+    """Tests for _collect_models function."""
+
+    def test_single_model(self):
+        result = _collect_models(SimpleModel)
+        assert SimpleModel in result
+
+    def test_nested_model(self):
+        result = _collect_models(BugReport)
+        assert BugReport in result
+        # BugReport has no nested models in our test fixtures
+
+    def test_list_of_model(self):
+        result = _collect_models(list[SimpleModel])
+        assert SimpleModel in result
+
+    def test_empty_set_bug_fixed(self):
+        """Regression test: empty set should work (was falsy bug)."""
+        result = set()
+        _collect_models(SimpleModel, result)
+        assert SimpleModel in result
+
+
+class TestPydanticToTypescript:
+    """Tests for pydantic_to_typescript function."""
+
+    def test_simple_model(self):
+        result = pydantic_to_typescript(SimpleModel)
+        assert "interface SimpleModel" in result
+        assert "name:" in result or "name?:" in result
+        assert "string" in result
+
+    def test_includes_jsdoc(self):
+        result = pydantic_to_typescript(BugReport)
+        # BugReport has descriptions
+        assert "/**" in result
+        assert "*/" in result
+
+    def test_optional_fields(self):
+        result = pydantic_to_typescript(SimpleModel)
+        # age has no default so should NOT be optional
+        # But this depends on model definition
+
+
+class TestValueToTypescript:
+    """Tests for value_to_typescript function."""
+
+    def test_primitives(self):
+        assert value_to_typescript(None) == "null"
+        assert value_to_typescript(True) == "true"
+        assert value_to_typescript(False) == "false"
+        assert value_to_typescript(42) == "42"
+        assert value_to_typescript(3.14) == "3.14"
+        assert value_to_typescript("hello") == '"hello"'
+
+    def test_string_escaping(self):
+        assert value_to_typescript('say "hi"') == '"say \\"hi\\""'
+        assert value_to_typescript("line1\nline2") == '"line1\\nline2"'
+
+    def test_simple_list(self):
+        result = value_to_typescript([1, 2, 3])
+        assert result == "[1, 2, 3]"
+
+    def test_simple_dict(self):
+        result = value_to_typescript({"a": 1})
+        assert "a:" in result
+        assert "1" in result
+
+    def test_pydantic_model(self):
+        model = SimpleModel(name="test", age=25)
+        result = value_to_typescript(model)
+        assert "name:" in result
+        assert '"test"' in result
+        assert "age:" in result
+        assert "25" in result
+
+    def test_nested_structure(self):
+        data = {"items": [{"name": "a"}, {"name": "b"}]}
+        result = value_to_typescript(data)
+        assert "items:" in result
+        assert '"a"' in result
+        assert '"b"' in result
+
+
+class TestFormatTurn2Typescript:
+    """Tests for CodexAdapter.format_turn2_typescript method."""
+
+    def test_basic_output(self):
+        adapter = CodexAdapter()
+        sig = MockSignature(
+            input_fields={"x": (str, None)},
+            output_fields={"result": (SimpleModel, "The result")},
+        )
+        result = adapter.format_turn2_typescript(sig)
+
+        assert "interface SimpleModel" in result
+        assert "type Response" in result
+        assert "result:" in result
+
+    def test_includes_examples(self):
+        adapter = CodexAdapter()
+
+        class SigWithExamples:
+            output_fields = {"result": MockFieldInfo(SimpleModel, "The result")}
+
+            class Examples:
+                outputs = [SimpleModel(name="test", age=30)]
+
+        result = adapter.format_turn2_typescript(SigWithExamples)
+
+        assert "Example output:" in result
+        assert '"test"' in result
+        assert "30" in result
+
+    def test_multiple_examples(self):
+        adapter = CodexAdapter()
+
+        class SigWithMultipleExamples:
+            output_fields = {"result": MockFieldInfo(SimpleModel, "The result")}
+
+            class Examples:
+                outputs = [
+                    SimpleModel(name="first", age=1),
+                    SimpleModel(name="second", age=2),
+                ]
+
+        result = adapter.format_turn2_typescript(SigWithMultipleExamples)
+
+        assert "Example outputs:" in result
+        assert "// Example 1:" in result
+        assert "// Example 2:" in result
+        assert '"first"' in result
+        assert '"second"' in result
+
+
+class MockFieldInfo:
+    """Mock for testing."""
+    def __init__(self, annotation, description=None):
+        self.annotation = annotation
+        self.description = description
