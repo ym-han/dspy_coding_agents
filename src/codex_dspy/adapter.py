@@ -482,6 +482,7 @@ class CodexAdapter:
         parts = []
         parts.append("Respond with a TypeScript value matching this type:")
         parts.append("")
+        parts.append("```typescript")
 
         # Collect all Pydantic models from output fields
         models_to_render = []
@@ -508,6 +509,7 @@ class CodexAdapter:
             ts_type = _ts_type(field.annotation)
             parts.append(f"  {name}: {ts_type};")
         parts.append("};")
+        parts.append("```")
 
         # Add static examples if defined on signature
         examples = getattr(signature, 'Examples', None)
@@ -517,12 +519,18 @@ class CodexAdapter:
                 parts.append("")
                 if len(output_examples) == 1:
                     parts.append("Example output:")
+                    parts.append("```typescript")
                     parts.append(value_to_typescript(output_examples[0]))
+                    parts.append("```")
                 else:
                     parts.append("Example outputs:")
+                    parts.append("```typescript")
                     for i, ex in enumerate(output_examples):
-                        parts.append(f"\n// Example {i + 1}:")
+                        parts.append(f"// Example {i + 1}:")
                         parts.append(value_to_typescript(ex))
+                        if i < len(output_examples) - 1:
+                            parts.append("")
+                    parts.append("```")
 
         return "\n".join(parts)
 

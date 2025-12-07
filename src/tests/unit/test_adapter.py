@@ -739,9 +739,11 @@ class TestFormatTurn2Typescript:
         )
         result = adapter.format_turn2_typescript(sig)
 
+        assert "```typescript" in result
         assert "interface SimpleModel" in result
         assert "type Response" in result
         assert "result:" in result
+        assert result.count("```") >= 2  # Opening and closing fences
 
     def test_includes_examples(self):
         adapter = CodexAdapter()
