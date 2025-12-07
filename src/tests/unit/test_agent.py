@@ -388,6 +388,40 @@ class TestBuildOutputSchema:
         assert "items" in schema["required"]
         assert "items" in schema["properties"]
 
+    def test_defs_hoisted_to_root(self):
+        """$defs from nested models should be hoisted to root level."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        class Outer(BaseModel):
+            inner: Inner
+
+        sig = MockSignature({"result": Outer})
+        schema = _build_output_schema(sig)
+
+        # $defs should be at root, not buried in properties
+        assert "$defs" in schema
+        assert "Inner" in schema["$defs"]
+        # Should not be in the property schema
+        assert "$defs" not in schema["properties"]["result"]
+
+    def test_defs_hoisted_from_list_of_models(self):
+        """$defs from list[Model] should be hoisted to root."""
+        from pydantic import BaseModel
+
+        class BugReport(BaseModel):
+            severity: str
+            description: str
+
+        sig = MockSignature({"bugs": list[BugReport]})
+        schema = _build_output_schema(sig)
+
+        # $defs should be at root level
+        assert "$defs" in schema
+        assert "BugReport" in schema["$defs"]
+
 
 class TestParseOutputValue:
     """TDD tests for _parse_output_value function.

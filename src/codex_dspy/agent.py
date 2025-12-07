@@ -149,9 +149,14 @@ def _is_all_str_outputs(signature: Signature) -> bool:
 
 
 def _build_output_schema(signature: Signature) -> dict[str, Any]:
-    """Build a combined JSON schema for all output fields."""
+    """Build a combined JSON schema for all output fields.
+
+    Hoists $defs from individual field schemas to the root level so that
+    $ref pointers resolve correctly.
+    """
     properties = {}
     required = []
+    all_defs: dict[str, Any] = {}
 
     for name, field in signature.output_fields.items():
         annotation = field.annotation
@@ -159,11 +164,19 @@ def _build_output_schema(signature: Signature) -> dict[str, Any]:
             properties[name] = {"type": "string"}
         elif hasattr(annotation, "model_json_schema"):
             # Pydantic model
-            properties[name] = annotation.model_json_schema()
+            field_schema = annotation.model_json_schema()
+            # Hoist $defs to root
+            if "$defs" in field_schema:
+                all_defs.update(field_schema.pop("$defs"))
+            properties[name] = field_schema
         else:
             # Fallback - try to get schema via pydantic TypeAdapter
             from pydantic import TypeAdapter
-            properties[name] = TypeAdapter(annotation).json_schema()
+            field_schema = TypeAdapter(annotation).json_schema()
+            # Hoist $defs to root
+            if "$defs" in field_schema:
+                all_defs.update(field_schema.pop("$defs"))
+            properties[name] = field_schema
 
         # Check if required (not Optional)
         # Handle both typing.Union and types.UnionType (PEP 604: str | None)
@@ -172,12 +185,17 @@ def _build_output_schema(signature: Signature) -> dict[str, Any]:
         if not is_optional:
             required.append(name)
 
-    schema = {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": False,
     }
+
+    # Add hoisted $defs at root level
+    if all_defs:
+        schema["$defs"] = all_defs
+
     return schema
 
 
