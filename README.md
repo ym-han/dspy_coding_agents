@@ -457,7 +457,8 @@ uv run pre-commit run --all-files
 
 ### Test Structure
 
-Tests are co-located in `src/tests/unit/`. The pre-commit hook enforces this:
+Tests are co-located under `src/tests/` and the pre-commit hook enforces the
+two approved locations:
 
 ```
 src/
@@ -465,8 +466,8 @@ src/
 │   ├── adapter.py
 │   └── agent.py
 └── tests/
-    └── unit/
-        └── test_adapter.py
+    ├── unit/      # example-based tests
+    └── property/  # hypothesis property tests
 ```
 
 ## Contributing

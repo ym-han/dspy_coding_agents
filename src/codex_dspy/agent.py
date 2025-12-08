@@ -9,10 +9,11 @@ Uses a two-turn pattern:
 - Turn 2: Structured output extraction (agent formats findings)
 """
 
+import inspect
 import json
 import re
 import types
-from typing import Any, Optional, Union, get_args, get_origin
+from typing import Any, Literal, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -73,8 +74,8 @@ def _parse_output_value(value: Any, annotation: type) -> Any:
 
     Handles:
     - None values (pass through)
-    - list[PydanticModel] - validate each element
-    - list[Model | None] - validate dicts, keep Nones
+    - list[T] with recursive validation (including optional/model inner types)
+    - dict[K, V] with recursive validation of V
     - Model | None - validate if dict, pass through if None
     - Direct PydanticModel - validate dict
     - Primitives and other types - pass through
@@ -92,40 +93,84 @@ def _parse_output_value(value: Any, annotation: type) -> Any:
     origin = get_origin(annotation)
 
     # Handle list types
-    if origin is list:
+    if origin is list and isinstance(value, list):
         inner_type = get_args(annotation)[0] if get_args(annotation) else None
-        if inner_type and isinstance(value, list):
-            # Check if inner type is Optional[Model] (Model | None)
-            inner_origin = get_origin(inner_type)
-            if inner_origin is Union or inner_origin is types.UnionType:
-                inner_args = get_args(inner_type)
-                # Find the non-None type
-                model_type = next((a for a in inner_args if a is not type(None)), None)
-                if model_type and hasattr(model_type, "model_validate"):
-                    # list[Model | None] - validate dicts, keep Nones
-                    return [
-                        model_type.model_validate(v) if isinstance(v, dict) else v
-                        for v in value
-                    ]
-            # Check if inner type is a direct Pydantic model
-            elif hasattr(inner_type, "model_validate"):
-                return [inner_type.model_validate(v) for v in value]
+        if inner_type:
+            return [_parse_output_value(v, inner_type) for v in value]
         return value
 
-    # Handle Optional[Model] or Optional[list[Model]] (Model | None, list[Model] | None)
+    # Handle dict types (validate values recursively)
+    if origin is dict and isinstance(value, dict):
+        key_type, val_type = (get_args(annotation) + (None, None))[:2]
+        if val_type:
+            return {k: _parse_output_value(v, val_type) for k, v in value.items()}
+        return value
+
+    # Handle Literal[...] validation
+    if origin is Literal:
+        allowed = set(get_args(annotation))
+        if value in allowed:
+            return value
+        raise ValueError(f"Literal value {value!r} not in allowed set {allowed!r}")
+
+    # Handle Union types (including Optional and multi-branch unions)
     if origin is Union or origin is types.UnionType:
         args = get_args(annotation)
-        if type(None) in args:
-            # Find the non-None type
-            non_none_type = next((a for a in args if a is not type(None)), None)
-            if non_none_type:
-                # If non-None type is a Pydantic model and value is dict, validate
-                if hasattr(non_none_type, "model_validate") and isinstance(value, dict):
-                    return non_none_type.model_validate(value)
-                # If non-None type is list[...], recurse to handle list validation
-                if get_origin(non_none_type) is list and isinstance(value, list):
-                    return _parse_output_value(value, non_none_type)
-        return value
+        has_none = type(None) in args
+
+        # Optional shortcut
+        if value is None and has_none:
+            return None
+
+        def _matches_annotation(val: Any, ann: Any) -> bool:
+            ann_origin = get_origin(ann)
+            if ann is str:
+                return isinstance(val, str)
+            if ann is int:
+                return isinstance(val, int)
+            if ann is float:
+                return isinstance(val, float)
+            if ann is bool:
+                return isinstance(val, bool)
+            if inspect.isclass(ann) and issubclass(ann, BaseModel):
+                return isinstance(val, ann)
+            if ann_origin is list:
+                if not isinstance(val, list):
+                    return False
+                inner = get_args(ann)[0] if get_args(ann) else Any
+                return all(_matches_annotation(elem, inner) for elem in val)
+            if ann_origin is dict:
+                if not isinstance(val, dict):
+                    return False
+                val_type = get_args(ann)[1] if len(get_args(ann)) > 1 else Any
+                return all(_matches_annotation(v, val_type) for v in val.values())
+            if ann_origin is Literal:
+                return val in get_args(ann)
+            if ann_origin is Union or ann_origin is types.UnionType:
+                inner_args = get_args(ann)
+                if type(None) in inner_args and val is None:
+                    return True
+                return any(_matches_annotation(val, b) for b in inner_args if b is not type(None))
+            if isinstance(ann, type):
+                return isinstance(val, ann)
+            return True
+
+        # Try each non-None branch until one succeeds
+        last_error = None
+        for branch in args:
+            if branch is type(None):
+                continue
+            try:
+                candidate = _parse_output_value(value, branch)
+                if _matches_annotation(candidate, branch):
+                    return candidate
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                continue
+
+        raise ValueError(
+            f"Value {value!r} did not match any Union branch {args}"
+        ) from last_error
 
     # Handle direct Pydantic model
     if hasattr(annotation, "model_validate"):
