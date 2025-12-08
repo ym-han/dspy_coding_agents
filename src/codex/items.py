@@ -1,37 +1,74 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterable, Literal, Sequence, cast
+from typing import Literal, cast
 
 from .exceptions import CodexError
+from .types import JsonObject, JsonValue
 
 
 class CommandExecutionStatus(StrEnum):
+    """Status of a command execution."""
+
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    DECLINED = "declined"
 
 
 class PatchChangeKind(StrEnum):
+    """Type of file change in a patch."""
+
     ADD = "add"
     DELETE = "delete"
     UPDATE = "update"
 
 
 class PatchApplyStatus(StrEnum):
+    """Status of a patch application."""
+
+    IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
 class McpToolCallStatus(StrEnum):
+    """Status of an MCP tool call."""
+
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
+class McpContentBlock:
+    """A content block from an MCP tool result."""
+
+    type: str
+    data: JsonObject  # The raw content block data (always a JSON object)
+
+
+@dataclass(frozen=True, slots=True)
+class McpToolCallResult:
+    """Result payload returned by the MCP server for successful calls."""
+
+    content: Sequence[McpContentBlock]
+    structured_content: JsonValue | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class McpToolCallError:
+    """Error reported for failed MCP tool calls."""
+
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class CommandExecutionItem:
+    """A command executed by the agent."""
+
     type: Literal["command_execution"] = field(default="command_execution", init=False)
     id: str
     command: str
@@ -42,12 +79,16 @@ class CommandExecutionItem:
 
 @dataclass(frozen=True, slots=True)
 class FileUpdateChange:
+    """A single file change within a patch."""
+
     path: str
     kind: PatchChangeKind
 
 
 @dataclass(frozen=True, slots=True)
 class FileChangeItem:
+    """A set of file changes by the agent."""
+
     type: Literal["file_change"] = field(default="file_change", init=False)
     id: str
     changes: Sequence[FileUpdateChange]
@@ -56,15 +97,22 @@ class FileChangeItem:
 
 @dataclass(frozen=True, slots=True)
 class McpToolCallItem:
+    """A call to an MCP tool."""
+
     type: Literal["mcp_tool_call"] = field(default="mcp_tool_call", init=False)
     id: str
     server: str
     tool: str
+    arguments: JsonValue  # Can be any JSON-serializable value
     status: McpToolCallStatus
+    result: McpToolCallResult | None = None
+    error: McpToolCallError | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class AgentMessageItem:
+    """Response from the agent (natural language or JSON for structured output)."""
+
     type: Literal["agent_message"] = field(default="agent_message", init=False)
     id: str
     text: str
@@ -72,6 +120,8 @@ class AgentMessageItem:
 
 @dataclass(frozen=True, slots=True)
 class ReasoningItem:
+    """Agent's reasoning summary."""
+
     type: Literal["reasoning"] = field(default="reasoning", init=False)
     id: str
     text: str
@@ -79,6 +129,8 @@ class ReasoningItem:
 
 @dataclass(frozen=True, slots=True)
 class WebSearchItem:
+    """A web search request."""
+
     type: Literal["web_search"] = field(default="web_search", init=False)
     id: str
     query: str
@@ -86,6 +138,8 @@ class WebSearchItem:
 
 @dataclass(frozen=True, slots=True)
 class ErrorItem:
+    """A non-fatal error surfaced as an item."""
+
     type: Literal["error"] = field(default="error", init=False)
     id: str
     message: str
@@ -93,12 +147,16 @@ class ErrorItem:
 
 @dataclass(frozen=True, slots=True)
 class TodoItem:
+    """An item in the agent's to-do list."""
+
     text: str
     completed: bool
 
 
 @dataclass(frozen=True, slots=True)
 class TodoListItem:
+    """The agent's running to-do list."""
+
     type: Literal["todo_list"] = field(default="todo_list", init=False)
     id: str
     items: Sequence[TodoItem]
@@ -116,19 +174,19 @@ ThreadItem = (
 )
 
 
-def _ensure_str(value: object, field: str) -> str:
+def _ensure_str(value: JsonValue, field_name: str) -> str:
     if isinstance(value, str):
         return value
-    raise CodexError(f"Expected string for {field}")
+    raise CodexError(f"Expected string for {field_name}")
 
 
-def _ensure_sequence(value: object, field: str) -> Sequence[object]:
+def _ensure_sequence(value: JsonValue, field_name: str) -> Sequence[JsonValue]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return cast(Sequence[object], value)
-    raise CodexError(f"Expected sequence for {field}")
+        return cast("Sequence[JsonValue]", value)
+    raise CodexError(f"Expected sequence for {field_name}")
 
 
-def _parse_changes(values: Iterable[object]) -> list[FileUpdateChange]:
+def _parse_changes(values: Iterable[JsonValue]) -> list[FileUpdateChange]:
     changes: list[FileUpdateChange] = []
     for value in values:
         if not isinstance(value, dict):
@@ -143,7 +201,7 @@ def _parse_changes(values: Iterable[object]) -> list[FileUpdateChange]:
     return changes
 
 
-def _parse_todos(values: Iterable[object]) -> list[TodoItem]:
+def _parse_todos(values: Iterable[JsonValue]) -> list[TodoItem]:
     todos: list[TodoItem] = []
     for value in values:
         if not isinstance(value, dict):
@@ -154,10 +212,8 @@ def _parse_todos(values: Iterable[object]) -> list[TodoItem]:
     return todos
 
 
-def parse_thread_item(payload: object) -> ThreadItem:
-    if not isinstance(payload, dict):
-        raise CodexError("Thread item must be an object")
-
+def parse_thread_item(payload: JsonObject) -> ThreadItem:
+    """Parse a JSON object into a ThreadItem."""
     type_name = _ensure_str(payload.get("type"), "type")
     item_id = _ensure_str(payload.get("id"), "id")
 
@@ -200,16 +256,47 @@ def parse_thread_item(payload: object) -> ThreadItem:
     if type_name == "mcp_tool_call":
         server = _ensure_str(payload.get("server"), "server")
         tool = _ensure_str(payload.get("tool"), "tool")
+        arguments = payload.get("arguments")  # Can be any JSON value
         status_str = _ensure_str(payload.get("status"), "status")
         try:
             call_status = McpToolCallStatus(status_str)
         except ValueError as exc:
             raise CodexError(f"Unsupported MCP tool call status: {status_str}") from exc
+
+        # Parse optional result
+        result: McpToolCallResult | None = None
+        result_payload = payload.get("result")
+        if result_payload is not None and isinstance(result_payload, dict):
+            content_raw = result_payload.get("content", [])
+            content_blocks: list[McpContentBlock] = []
+            if isinstance(content_raw, list):
+                for block in content_raw:
+                    if isinstance(block, dict):
+                        block_type = block.get("type", "unknown")
+                        content_blocks.append(
+                            McpContentBlock(
+                                type=str(block_type),
+                                data=block,
+                            )
+                        )
+            structured = result_payload.get("structured_content")
+            result = McpToolCallResult(content=content_blocks, structured_content=structured)
+
+        # Parse optional error
+        error: McpToolCallError | None = None
+        error_payload = payload.get("error")
+        if error_payload is not None and isinstance(error_payload, dict):
+            error_message = error_payload.get("message", "")
+            error = McpToolCallError(message=str(error_message))
+
         return McpToolCallItem(
             id=item_id,
             server=server,
             tool=tool,
+            arguments=arguments,
             status=call_status,
+            result=result,
+            error=error,
         )
 
     if type_name == "web_search":

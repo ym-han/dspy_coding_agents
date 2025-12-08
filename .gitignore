@@ -54,3 +54,4 @@ htmlcov/
 Thumbs.db
 tmp/
 /.hypothesis/
+tmp/**

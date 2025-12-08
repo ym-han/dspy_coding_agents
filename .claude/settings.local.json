@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "/home/darin/proj/delightful-infra/infra/agents/claude-dspy"
+    ],
+    "allow": [
+      "Skill(superpowers:brainstorming)"
+    ]
+  }
+}

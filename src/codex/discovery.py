@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -31,12 +32,24 @@ def _detect_target() -> str:
 
 
 def find_codex_binary(override: str | None = None) -> Path:
+    """Find the codex binary.
+
+    Search order:
+    1. Explicit override path
+    2. `codex` in PATH
+    3. Vendored binary
+    """
     if override:
         return Path(override)
 
+    # Check PATH first
+    path_binary = shutil.which("codex")
+    if path_binary:
+        return Path(path_binary)
+
+    # Fall back to vendored binary
     target = _detect_target()
     package_root = Path(__file__).resolve().parent
     vendor_root = package_root / "vendor" / target / "codex"
     binary_name = "codex.exe" if sys.platform == "win32" else "codex"
-    binary_path = vendor_root / binary_name
-    return binary_path
+    return vendor_root / binary_name

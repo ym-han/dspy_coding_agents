@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 import dspy
-from codex import SandboxMode
+from codex import Model, ModelReasoningEffort, SandboxMode
 
 from codex_dspy import CodexAgent
 
@@ -28,7 +28,9 @@ def example_1_simple_string():
     agent = CodexAgent(
         sig,
         working_directory=".",
+        model=Model.GPT_5_1_CODEX_MAX,
         sandbox_mode=SandboxMode.READ_ONLY,
+        model_reasoning_effort=ModelReasoningEffort.LOW,
     )
 
     result = agent(message="What files are in this directory? List the top 5.")
@@ -50,16 +52,19 @@ def example_2_multi_field_pydantic():
         location: str = Field(description="File and line number")
         description: str = Field(description="What the bug does")
 
-    # Multiple inputs AND outputs
+    # Multiple inputs AND outputs - pass custom types explicitly
     sig = dspy.Signature(
         "code: str, context: str -> bugs: list[BugReport], summary: str",
-        "Analyze code for potential bugs"
+        "Analyze code for potential bugs",
+        custom_types={"BugReport": BugReport},
     )
 
     agent = CodexAgent(
         sig,
         working_directory=".",
+        model=Model.GPT_5_1_CODEX_MAX,
         sandbox_mode=SandboxMode.READ_ONLY,
+        model_reasoning_effort=ModelReasoningEffort.LOW,
     )
 
     result = agent(
@@ -91,7 +96,9 @@ def example_3_multi_turn():
     agent = CodexAgent(
         sig,
         working_directory=".",
+        model=Model.GPT_5_1_CODEX_MAX,
         sandbox_mode=SandboxMode.READ_ONLY,
+        model_reasoning_effort=ModelReasoningEffort.LOW,
     )
 
     # Turn 1
@@ -124,13 +131,16 @@ def example_4_complex_analysis():
 
     sig = dspy.Signature(
         "directory: str, focus: str -> analysis: RepoAnalysis, recommendations: str",
-        "Analyze repository structure and provide recommendations"
+        "Analyze repository structure and provide recommendations",
+        custom_types={"RepoAnalysis": RepoAnalysis, "FileInfo": FileInfo},
     )
 
     agent = CodexAgent(
         sig,
         working_directory=".",
+        model=Model.GPT_5_1_CODEX_MAX,
         sandbox_mode=SandboxMode.READ_ONLY,
+        model_reasoning_effort=ModelReasoningEffort.LOW,
     )
 
     result = agent(
@@ -159,7 +169,9 @@ def example_5_trace_inspection():
     agent = CodexAgent(
         sig,
         working_directory=".",
+        model=Model.GPT_5_1_CODEX_MAX,
         sandbox_mode=SandboxMode.READ_ONLY,
+        model_reasoning_effort=ModelReasoningEffort.LOW,
     )
 
     result = agent(task="Count the number of Python files in this project")

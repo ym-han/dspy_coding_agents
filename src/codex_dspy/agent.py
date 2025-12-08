@@ -21,7 +21,7 @@ import dspy
 from dspy.primitives.prediction import Prediction
 from dspy.signatures.signature import Signature, ensure_signature
 
-from codex import Codex, CodexOptions, SandboxMode, ThreadOptions, TurnOptions
+from codex import Codex, CodexOptions, ModelReasoningEffort, SandboxMode, ThreadOptions, TurnOptions
 from codex_dspy.adapter import CodexAdapter
 
 
@@ -198,6 +198,40 @@ def _is_all_str_outputs(signature: Signature) -> bool:
     return True
 
 
+def _ensure_additional_properties_false(schema: dict[str, Any]) -> None:
+    """Recursively add additionalProperties: false to all object schemas.
+
+    The OpenAI API requires all object schemas to have additionalProperties: false.
+    This mutates the schema in place.
+    """
+    if not isinstance(schema, dict):
+        return
+
+    # If this is an object type, ensure additionalProperties is false
+    if schema.get("type") == "object":
+        schema["additionalProperties"] = False
+
+    # Recurse into properties
+    if "properties" in schema:
+        for prop_schema in schema["properties"].values():
+            _ensure_additional_properties_false(prop_schema)
+
+    # Recurse into $defs
+    if "$defs" in schema:
+        for def_schema in schema["$defs"].values():
+            _ensure_additional_properties_false(def_schema)
+
+    # Recurse into array items
+    if "items" in schema:
+        _ensure_additional_properties_false(schema["items"])
+
+    # Recurse into allOf, anyOf, oneOf
+    for key in ("allOf", "anyOf", "oneOf"):
+        if key in schema:
+            for sub_schema in schema[key]:
+                _ensure_additional_properties_false(sub_schema)
+
+
 def _build_output_schema(signature: Signature) -> dict[str, Any]:
     """Build a combined JSON schema for all output fields.
 
@@ -246,6 +280,9 @@ def _build_output_schema(signature: Signature) -> dict[str, Any]:
     if all_defs:
         schema["$defs"] = all_defs
 
+    # Ensure all nested objects have additionalProperties: false
+    _ensure_additional_properties_false(schema)
+
     return schema
 
 
@@ -290,6 +327,7 @@ class CodexAgent(dspy.Module):
         working_directory: str,
         model: Optional[str] = None,
         sandbox_mode: Optional[SandboxMode] = None,
+        model_reasoning_effort: Optional[ModelReasoningEffort] = None,
         skip_git_repo_check: bool = False,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
@@ -331,6 +369,7 @@ class CodexAgent(dspy.Module):
                 working_directory=working_directory,
                 model=model,
                 sandbox_mode=sandbox_mode,
+                model_reasoning_effort=model_reasoning_effort,
                 skip_git_repo_check=skip_git_repo_check,
             )
         )

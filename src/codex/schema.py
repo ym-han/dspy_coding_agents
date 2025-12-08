@@ -3,22 +3,22 @@ from __future__ import annotations
 import json
 import tempfile
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Type, cast
-from functools import lru_cache
+from typing import Any, cast
 
-from .exceptions import SchemaValidationError
 from .config import SchemaInput
+from .exceptions import SchemaValidationError
 
 
 @lru_cache(maxsize=1)
-def _get_pydantic_base_model() -> Type[Any] | None:  # pragma: no cover - import guard
+def _get_pydantic_base_model() -> type[Any] | None:  # pragma: no cover - import guard
     try:
         from pydantic import BaseModel
     except ImportError:
         return None
-    return cast(Type[Any], BaseModel)
+    return cast("type[Any]", BaseModel)
 
 
 def _is_pydantic_model(value: object) -> bool:
@@ -36,10 +36,10 @@ def _convert_schema_input(schema: SchemaInput | None) -> Mapping[str, object] | 
         return schema
 
     if _is_pydantic_model(schema):
-        return cast(Mapping[str, object], schema.model_json_schema())
+        return cast("Mapping[str, object]", schema.model_json_schema())
 
     if _is_pydantic_instance(schema):
-        return cast(Mapping[str, object], schema.model_json_schema())
+        return cast("Mapping[str, object]", schema.model_json_schema())
 
     raise SchemaValidationError(
         "output_schema must be a mapping or a Pydantic BaseModel (class or instance)",

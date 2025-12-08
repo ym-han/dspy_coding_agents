@@ -3,11 +3,11 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from threading import Thread
-from typing import Iterator, Optional
 
-from .config import SandboxMode
+from .config import ApprovalMode, ModelReasoningEffort, SandboxMode
 from .discovery import find_codex_binary
 from .exceptions import ExecExitError, SpawnError
 
@@ -17,22 +17,38 @@ PYTHON_SDK_ORIGINATOR = "codex_sdk_py"
 
 @dataclass(frozen=True, slots=True)
 class ExecArgs:
+    """Arguments for executing Codex CLI."""
+
     input: str
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    thread_id: Optional[str] = None
-    model: Optional[str] = None
-    sandbox_mode: Optional[SandboxMode] = None
-    working_directory: Optional[str] = None
+    base_url: str | None = None
+    api_key: str | None = None
+    thread_id: str | None = None
+    images: Sequence[str] | None = None
+    model: str | None = None
+    sandbox_mode: SandboxMode | None = None
+    working_directory: str | None = None
+    additional_directories: Sequence[str] | None = None
     skip_git_repo_check: bool = False
-    output_schema_path: Optional[str] = None
+    output_schema_path: str | None = None
+    model_reasoning_effort: ModelReasoningEffort | None = None
+    network_access_enabled: bool | None = None
+    web_search_enabled: bool | None = None
+    approval_policy: ApprovalMode | None = None
 
 
 class CodexExec:
-    def __init__(self, executable_override: Optional[str] = None) -> None:
+    """Executes the Codex CLI binary."""
+
+    def __init__(
+        self,
+        executable_override: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self._binary = find_codex_binary(executable_override)
+        self._env_override = env
 
     def build_command(self, args: ExecArgs) -> list[str]:
+        """Build the CLI command from arguments."""
         command = [str(self._binary), "exec", "--experimental-json"]
 
         if args.model:
@@ -41,19 +57,41 @@ class CodexExec:
             command.extend(["--sandbox", args.sandbox_mode.value])
         if args.working_directory:
             command.extend(["--cd", args.working_directory])
+        if args.additional_directories:
+            for dir_path in args.additional_directories:
+                command.extend(["--add-dir", dir_path])
         if args.skip_git_repo_check:
             command.append("--skip-git-repo-check")
         if args.output_schema_path:
             command.extend(["--output-schema", args.output_schema_path])
+        if args.model_reasoning_effort:
+            command.extend(
+                ["--config", f'model_reasoning_effort="{args.model_reasoning_effort.value}"']
+            )
+        if args.network_access_enabled is not None:
+            value = "true" if args.network_access_enabled else "false"
+            command.extend(["--config", f"sandbox_workspace_write.network_access={value}"])
+        if args.web_search_enabled is not None:
+            value = "true" if args.web_search_enabled else "false"
+            command.extend(["--config", f"features.web_search_request={value}"])
+        if args.approval_policy:
+            command.extend(["--config", f'approval_policy="{args.approval_policy.value}"'])
+        if args.images:
+            for image_path in args.images:
+                command.extend(["--image", image_path])
         if args.thread_id:
             command.extend(["resume", args.thread_id])
 
         return command
 
     def run_lines(self, args: ExecArgs) -> Iterator[str]:
+        """Execute the command and yield stdout lines."""
         command = self.build_command(args)
 
-        env = os.environ.copy()
+        if self._env_override is not None:
+            env = dict(self._env_override)
+        else:
+            env = os.environ.copy()
         env.setdefault(INTERNAL_ORIGINATOR_ENV, PYTHON_SDK_ORIGINATOR)
         if args.base_url:
             env["OPENAI_BASE_URL"] = args.base_url
@@ -82,6 +120,7 @@ class CodexExec:
 
         stderr_thread: Thread | None = None
         if process.stderr:
+
             def _drain_stderr(pipe: io.TextIOBase, buffer: list[str]) -> None:
                 while True:
                     try:

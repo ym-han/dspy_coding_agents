@@ -10,6 +10,7 @@ import pytest
 from codex_dspy.agent import (
     _build_output_schema,
     _combine_usage,
+    _ensure_additional_properties_false,
     _is_all_str_outputs,
     _parse_output_value,
     _strip_json_fences,
@@ -649,3 +650,197 @@ class TestParseOutputValue:
         result = _parse_output_value(["a", "b", "c"], list[str])
 
         assert result == ["a", "b", "c"]
+
+
+class TestEnsureAdditionalPropertiesFalse:
+    """Tests for _ensure_additional_properties_false function.
+
+    This is critical - the OpenAI API rejects schemas without
+    additionalProperties: false on ALL object types.
+    """
+
+    def test_adds_to_root_object(self):
+        """Root object should get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["additionalProperties"] is False
+
+    def test_adds_to_nested_properties(self):
+        """Nested objects in properties should get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                }
+            },
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["additionalProperties"] is False
+        assert schema["properties"]["user"]["additionalProperties"] is False
+
+    def test_adds_to_defs(self):
+        """Objects in $defs should get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {"result": {"$ref": "#/$defs/MyModel"}},
+            "$defs": {
+                "MyModel": {
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                }
+            },
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["$defs"]["MyModel"]["additionalProperties"] is False
+
+    def test_adds_to_array_items(self):
+        """Objects in array items should get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    },
+                }
+            },
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["properties"]["items"]["items"]["additionalProperties"] is False
+
+    def test_adds_to_anyof(self):
+        """Objects in anyOf should get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "result": {
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "null"},
+                    ]
+                }
+            },
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["properties"]["result"]["anyOf"][0]["additionalProperties"] is False
+
+    def test_adds_to_oneof(self):
+        """Objects in oneOf should get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "variant": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"x": {"type": "integer"}}},
+                        {"type": "object", "properties": {"y": {"type": "integer"}}},
+                    ]
+                }
+            },
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["properties"]["variant"]["oneOf"][0]["additionalProperties"] is False
+        assert schema["properties"]["variant"]["oneOf"][1]["additionalProperties"] is False
+
+    def test_deeply_nested(self):
+        """Deeply nested objects should all get additionalProperties: false."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "level1": {
+                    "type": "object",
+                    "properties": {
+                        "level2": {
+                            "type": "object",
+                            "properties": {
+                                "level3": {
+                                    "type": "object",
+                                    "properties": {"value": {"type": "string"}},
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["additionalProperties"] is False
+        level1 = schema["properties"]["level1"]
+        assert level1["additionalProperties"] is False
+        level2 = level1["properties"]["level2"]
+        assert level2["additionalProperties"] is False
+        level3 = level2["properties"]["level3"]
+        assert level3["additionalProperties"] is False
+
+    def test_preserves_existing_false(self):
+        """Existing additionalProperties: false should be preserved."""
+        schema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["additionalProperties"] is False
+
+    def test_overwrites_existing_true(self):
+        """Existing additionalProperties: true should be overwritten to false."""
+        schema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        }
+        _ensure_additional_properties_false(schema)
+
+        assert schema["additionalProperties"] is False
+
+    def test_non_object_unchanged(self):
+        """Non-object types should not get additionalProperties."""
+        schema = {"type": "string"}
+        _ensure_additional_properties_false(schema)
+
+        assert "additionalProperties" not in schema
+
+    def test_array_type_unchanged(self):
+        """Array type itself should not get additionalProperties."""
+        schema = {"type": "array", "items": {"type": "string"}}
+        _ensure_additional_properties_false(schema)
+
+        assert "additionalProperties" not in schema
+
+    def test_handles_non_dict(self):
+        """Non-dict input should not raise."""
+        _ensure_additional_properties_false("not a dict")
+        _ensure_additional_properties_false(None)
+        _ensure_additional_properties_false(42)
+
+    def test_real_pydantic_schema(self):
+        """Test with actual Pydantic-generated schema structure."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        class Outer(BaseModel):
+            inner: Inner
+
+        schema = Outer.model_json_schema()
+        _ensure_additional_properties_false(schema)
+
+        # Root should have it
+        assert schema["additionalProperties"] is False
+        # $defs.Inner should have it
+        assert schema["$defs"]["Inner"]["additionalProperties"] is False

@@ -1,12 +1,18 @@
 {
   description = "Dev shell for codex_dspy (Python 3.13 + uv).";
 
+  nixConfig = {
+    extra-substituters = [ "https://numtide.cachix.org" ];
+    extra-trusted-public-keys = [ "numtide.cachix.org-1:2ps1kLBUWjxIneOy1Ik6cQjb41X0iXVXeHigGmycPPE=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
-  outputs = inputs@{ nixpkgs, flake-parts, ... }:
+  outputs = inputs@{ nixpkgs, flake-parts, llm-agents, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
         "x86_64-linux"
@@ -24,6 +30,7 @@
             pkgs.zlib
             pkgs.openssl
           ];
+          codex = llm-agents.packages.${system}.codex;
         in {
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
@@ -35,6 +42,7 @@
               libffi
               zlib
               cxxLib
+              codex
             ];
 
             env =
